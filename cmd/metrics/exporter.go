@@ -31,6 +31,7 @@ var (
 	metricsPort         = flag.Uint("metrics-port", 9141, "Port to listen on for web interface.")
 	metricsBindAddress  = flag.String("metrics-bind-address", "0.0.0.0", "The address the metric endpoint binds to")
 	metricsPath         = flag.String("metrics-path", "/metrics", "Path under which to expose metrics.")
+	disableMetricsAuth  = flag.Bool("disable-metrics-auth", false, "Disable Kubernetes authentication and authorization for metrics. TLS remains enabled; restrict access to the endpoint.")
 	tlsCertFile         = flag.String("tls-cert-file", "", "x509 certificate for HTTPS. If empty, a self-signed cert is auto-generated.")
 	tlsKeyFile          = flag.String("tls-private-key-file", "", "x509 private key matching --tls-cert-file.")
 	tlsCipherSuites     = flag.String("tls-cipher-suites", "", "Comma-separated list of TLS cipher suites. If empty, uses Go defaults.")
@@ -47,11 +48,15 @@ func main() {
 	}
 	logger := logging.GetLogger()
 	logger.SetLogLevel(logging.LevelError)
+	if *disableMetricsAuth {
+		// Keep the explicit security-mode notice visible at the default error log level.
+		_ = logger.Log("msg", "Kubernetes metrics authentication and authorization disabled; restrict access to the endpoint", "metrics_auth", "disabled")
+	}
 
 	level.Info(logger).Log("version", version.Version(), "commit", version.CommitHash(), "branch", version.Branch(), "goversion", version.GoString(), "msg", "FRR metrics exporter starting "+version.String())
 
 	mux := http.NewServeMux()
-	metricsHandler, err := newMetricsHandler()
+	metricsHandler, err := newMetricsHandler(*disableMetricsAuth, rbacFilter)
 	if err != nil {
 		level.Error(logger).Log("msg", "failed to create metrics handler", "error", err)
 		os.Exit(1)
@@ -85,9 +90,12 @@ func main() {
 	}
 }
 
-func newMetricsHandler() (http.Handler, error) {
+func newMetricsHandler(disableAuth bool, filterFactory func() (metricsserver.Filter, error)) (http.Handler, error) {
 	handler := promHandler()
-	filter, err := rbacFilter()
+	if disableAuth {
+		return handler, nil
+	}
+	filter, err := filterFactory()
 	if err != nil {
 		return nil, err
 	}

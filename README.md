@@ -78,6 +78,36 @@ If you are using frr-k8s with a kubernetes version that enforces pod security ad
     pod-security.kubernetes.io/warn: privileged
 ```
 
+## Standalone metrics exporter
+
+The `frr-metrics` binary can also monitor an FRR instance outside Kubernetes. It
+requires `/usr/bin/vtysh` and permission to access the FRR configuration and VTY
+sockets. By default, metrics requests use Kubernetes token authentication and
+authorization, and startup requires in-cluster configuration. A `KUBECONFIG`
+file does not replace that configuration.
+
+Explicitly disable Kubernetes authentication and authorization for standalone use:
+
+```bash
+frr-metrics --disable-metrics-auth \
+  --metrics-bind-address=127.0.0.1 --metrics-port=9141 \
+  --tls-cert-file=/etc/frr-metrics/tls.crt \
+  --tls-private-key-file=/etc/frr-metrics/tls.key
+```
+
+This option preserves HTTPS and the existing TLS settings. The certificate must
+be trusted by the scraper and match its configured server name. If no certificate
+pair is supplied, the exporter generates a self-signed certificate at startup.
+The server certificate encrypts the connection; it does not authenticate clients.
+Restrict endpoint access to authorized scrapers through the deployment's network
+or authenticated proxy. When publishing a port from a private container network,
+bind to a container-reachable interface and restrict the host-side publication;
+container loopback cannot receive connections forwarded to that interface.
+
+The default metrics path is `/metrics`. `/livez` remains a daemon-presence check
+outside metrics authentication, on the same HTTPS listener. No cluster deployment
+defaults change, and authentication errors never trigger an automatic bypass.
+
 ## Configuring FRR-K8s
 
 The CRD to configure `FRR-K8s` is the `FRRConfiguration`. A comprehensive documentation of the API can be found in
