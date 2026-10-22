@@ -7,8 +7,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
 
 	certutil "k8s.io/client-go/util/cert"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
@@ -16,16 +14,21 @@ import (
 
 // For builds a *tls.Config by applying the given TLS option function.
 // If certFile and keyFile are provided, a background certwatcher goroutine
-// is started to hot-reload them on change. Otherwise, a self-signed
-// certificate is generated in memory once.
-func For(tlsOpt func(*tls.Config), certFile, keyFile string) (*tls.Config, error) {
+// is started with ctx to hot-reload them on change. Its result channel must be
+// monitored for unexpected termination. With no certificate pair, a self-signed
+// certificate is generated in memory once and the result channel is nil.
+func For(ctx context.Context, tlsOpt func(*tls.Config), certFile, keyFile string) (*tls.Config, <-chan error, error) {
+	if (certFile == "") != (keyFile == "") {
+		return nil, nil, fmt.Errorf("certificate and private key must be provided together")
+	}
 	cfg := &tls.Config{}
 	tlsOpt(cfg)
 
 	if certFile != "" && keyFile != "" {
-		return withCertWatcher(cfg, certFile, keyFile)
+		return withCertWatcher(ctx, cfg, certFile, keyFile)
 	}
-	return withSelfSigned(cfg)
+	cfg, err := withSelfSigned(cfg)
+	return cfg, nil, err
 }
 
 // selfSignedCert generates a self-signed TLS certificate in memory using
@@ -56,14 +59,20 @@ func withSelfSigned(cfg *tls.Config) (*tls.Config, error) {
 	return cfg, nil
 }
 
-func withCertWatcher(cfg *tls.Config, certFile, keyFile string) (*tls.Config, error) {
-	ctx, _ := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-
+func withCertWatcher(ctx context.Context, cfg *tls.Config, certFile, keyFile string) (*tls.Config, <-chan error, error) {
 	cw, err := certwatcher.New(certFile, keyFile)
 	if err != nil {
-		return nil, fmt.Errorf("creating cert watcher: %w", err)
+		return nil, nil, fmt.Errorf("creating cert watcher: %w", err)
 	}
-	go cw.Start(ctx) //nolint:errcheck // certwatcher logs errors internally via its logr.Logger.
 	cfg.GetCertificate = cw.GetCertificate
-	return cfg, nil
+	return cfg, startCertWatcher(ctx, cw), nil
+}
+
+func startCertWatcher(ctx context.Context, cw *certwatcher.CertWatcher) <-chan error {
+	result := make(chan error, 1)
+	go func() {
+		result <- cw.Start(ctx)
+		close(result)
+	}()
+	return result
 }

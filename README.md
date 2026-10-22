@@ -96,8 +96,9 @@ frr-metrics --disable-metrics-auth \
 ```
 
 This option preserves HTTPS and the existing TLS settings. The certificate must
-be trusted by the scraper and match its configured server name. If no certificate
-pair is supplied, the exporter generates a self-signed certificate at startup.
+be trusted by the scraper and match its configured server name. Supply both
+certificate flags or neither; without them, the exporter generates a self-signed
+certificate at startup.
 The server certificate encrypts the connection; it does not authenticate clients.
 Restrict endpoint access to authorized scrapers through the deployment's network
 or authenticated proxy. When publishing a port from a private container network,
@@ -107,6 +108,12 @@ container loopback cannot receive connections forwarded to that interface.
 The default metrics path is `/metrics`. `/livez` remains a daemon-presence check
 outside metrics authentication, on the same HTTPS listener. No cluster deployment
 defaults change, and authentication errors never trigger an automatic bypass.
+
+SIGTERM and SIGINT stop new HTTP requests, allow up to five seconds for active
+requests to finish, then close remaining connections. Supplied certificates reload
+when their files change; temporary reload errors retain the last valid certificate.
+Unexpected certificate-watcher failure stops the exporter for supervisor restart.
+HTTP shutdown does not provide CLI subprocess cancellation or deadlines.
 
 ## Configuring FRR-K8s
 

@@ -3,11 +3,16 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	stdlog "log"
+	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/go-kit/log"
@@ -32,7 +37,7 @@ var (
 	metricsBindAddress  = flag.String("metrics-bind-address", "0.0.0.0", "The address the metric endpoint binds to")
 	metricsPath         = flag.String("metrics-path", "/metrics", "Path under which to expose metrics.")
 	disableMetricsAuth  = flag.Bool("disable-metrics-auth", false, "Disable Kubernetes authentication and authorization for metrics. TLS remains enabled; restrict access to the endpoint.")
-	tlsCertFile         = flag.String("tls-cert-file", "", "x509 certificate for HTTPS. If empty, a self-signed cert is auto-generated.")
+	tlsCertFile         = flag.String("tls-cert-file", "", "x509 certificate for HTTPS. If both certificate and key are empty, a self-signed cert is auto-generated.")
 	tlsKeyFile          = flag.String("tls-private-key-file", "", "x509 private key matching --tls-cert-file.")
 	tlsCipherSuites     = flag.String("tls-cipher-suites", "", "Comma-separated list of TLS cipher suites. If empty, uses Go defaults.")
 	tlsCurvePreferences = flag.String("tls-curve-preferences", "", "Comma-separated list of numeric CurveID values (see https://pkg.go.dev/crypto/tls#CurveID). If empty, uses Go defaults.")
@@ -55,24 +60,39 @@ func main() {
 
 	level.Info(logger).Log("version", version.Version(), "commit", version.CommitHash(), "branch", version.Branch(), "goversion", version.GoString(), "msg", "FRR metrics exporter starting "+version.String())
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	err := run(ctx)
+	stop()
+	if err != nil {
+		level.Error(logger).Log("msg", "metrics exporter stopped", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context) error {
+	logger := logging.GetLogger()
 	mux := http.NewServeMux()
 	metricsHandler, err := newMetricsHandler(*disableMetricsAuth, rbacFilter)
 	if err != nil {
-		level.Error(logger).Log("msg", "failed to create metrics handler", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("creating metrics handler: %w", err)
 	}
 	mux.Handle(*metricsPath, metricsHandler)
 	mux.Handle("/livez", liveness.Handler(vtysh.Run, logger))
 
 	tlsOpt, err := tlsconfig.OptFor(*tlsCipherSuites, *tlsCurvePreferences, *tlsMinVersionFlag)
 	if err != nil {
-		level.Error(logger).Log("msg", "failed to parse TLS flags", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("parsing TLS flags: %w", err)
 	}
-	tlsCfg, err := tlsconfig.For(tlsOpt, *tlsCertFile, *tlsKeyFile)
+	watchCtx, cancelWatch := context.WithCancel(ctx)
+	tlsCfg, watchResult, err := tlsconfig.For(watchCtx, tlsOpt, *tlsCertFile, *tlsKeyFile)
+	defer func() {
+		cancelWatch()
+		if watchResult != nil {
+			<-watchResult
+		}
+	}()
 	if err != nil {
-		level.Error(logger).Log("msg", "failed to configure TLS", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("configuring TLS: %w", err)
 	}
 
 	srv := &http.Server{
@@ -84,10 +104,51 @@ func main() {
 
 	level.Info(logger).Log("msg", "Starting exporter", "metricsPath", *metricsPath, "port", *metricsPort)
 
-	if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
-		level.Error(logger).Log("error", err)
-		os.Exit(1)
+	listener, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		return fmt.Errorf("listening for metrics: %w", err)
 	}
+	return serve(ctx, srv, listener, watchResult)
+}
+
+// serve waits for HTTP drain or forced connection close before returning. Existing CLI
+// queries still need their own cancellation and deadlines; closing a connection
+// cannot stop a handler blocked in a subprocess.
+func serve(ctx context.Context, srv *http.Server, listener net.Listener, watchResult <-chan error) error {
+	serverResult := make(chan error, 1)
+	go func() {
+		serverResult <- srv.ServeTLS(listener, "", "")
+	}()
+
+	var serveErr error
+	serverStopped := false
+	select {
+	case err := <-serverResult:
+		serverStopped = true
+		if !errors.Is(err, http.ErrServerClosed) {
+			serveErr = err
+		}
+	case <-ctx.Done():
+	case err := <-watchResult:
+		if ctx.Err() == nil {
+			if err == nil {
+				err = errors.New("watcher stopped unexpectedly")
+			}
+			serveErr = fmt.Errorf("watching TLS certificate: %w", err)
+		}
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		serveErr = errors.Join(serveErr, fmt.Errorf("shutting down metrics server: %w", err), srv.Close())
+	}
+	if !serverStopped {
+		if err := <-serverResult; !errors.Is(err, http.ErrServerClosed) {
+			serveErr = errors.Join(serveErr, err)
+		}
+	}
+	return serveErr
 }
 
 func newMetricsHandler(disableAuth bool, filterFactory func() (metricsserver.Filter, error)) (http.Handler, error) {
