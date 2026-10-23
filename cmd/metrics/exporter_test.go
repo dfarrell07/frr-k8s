@@ -93,6 +93,25 @@ func TestNewMetricsHandlerUsesAuthFilter(t *testing.T) {
 	}
 }
 
+func TestNewMetricsHandlerPassesBaseToFilter(t *testing.T) {
+	base := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	handler, err := newMetricsHandler(base, false, func() (metricsserver.Filter, error) {
+		return func(_ logr.Logger, next http.Handler) (http.Handler, error) {
+			return next, nil
+		}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("auth filter did not receive the supplied handler: status = %d", recorder.Code)
+	}
+}
+
 func TestNewMetricsHandlerWithoutCluster(t *testing.T) {
 	t.Setenv("KUBERNETES_SERVICE_HOST", "")
 	t.Setenv("KUBERNETES_SERVICE_PORT", "")
