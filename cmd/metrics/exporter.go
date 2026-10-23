@@ -72,7 +72,7 @@ func main() {
 func run(ctx context.Context) error {
 	logger := logging.GetLogger()
 	mux := http.NewServeMux()
-	metricsHandler, err := newMetricsHandler(*disableMetricsAuth, rbacFilter)
+	metricsHandler, err := newMetricsHandler(promHandler(), *disableMetricsAuth, rbacFilter)
 	if err != nil {
 		return fmt.Errorf("creating metrics handler: %w", err)
 	}
@@ -152,8 +152,7 @@ func serve(ctx context.Context, srv *http.Server, listener net.Listener, watchRe
 	return serveErr
 }
 
-func newMetricsHandler(disableAuth bool, filterFactory func() (metricsserver.Filter, error)) (http.Handler, error) {
-	handler := promHandler()
+func newMetricsHandler(handler http.Handler, disableAuth bool, filterFactory func() (metricsserver.Filter, error)) (http.Handler, error) {
 	if disableAuth {
 		return handler, nil
 	}
