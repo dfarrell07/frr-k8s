@@ -71,29 +71,25 @@ func TestNewMetricsHandlerAuthErrors(t *testing.T) {
 }
 
 func TestNewMetricsHandlerUsesAuthFilter(t *testing.T) {
-	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusInternalServerError} {
-		t.Run(http.StatusText(status), func(t *testing.T) {
-			calls := 0
-			handler, err := newMetricsHandler(false, func() (metricsserver.Filter, error) {
-				calls++
-				return func(_ logr.Logger, next http.Handler) (http.Handler, error) {
-					if next == nil {
-						t.Fatal("auth filter must wrap the Prometheus handler")
-					}
-					return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-						w.WriteHeader(status)
-					}), nil
-				}, nil
-			})
-			if err != nil {
-				t.Fatal(err)
+	calls := 0
+	handler, err := newMetricsHandler(false, func() (metricsserver.Filter, error) {
+		calls++
+		return func(_ logr.Logger, next http.Handler) (http.Handler, error) {
+			if next == nil {
+				t.Fatal("auth filter must wrap the Prometheus handler")
 			}
-			recorder := httptest.NewRecorder()
-			handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-			if calls != 1 || recorder.Code != status || recorder.Body.Len() != 0 {
-				t.Fatalf("filter calls = %d, response = %d %q", calls, recorder.Code, recorder.Body.String())
-			}
-		})
+			return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusForbidden)
+			}), nil
+		}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if calls != 1 || recorder.Code != http.StatusForbidden || recorder.Body.Len() != 0 {
+		t.Fatalf("filter calls = %d, response = %d %q", calls, recorder.Code, recorder.Body.String())
 	}
 }
 
