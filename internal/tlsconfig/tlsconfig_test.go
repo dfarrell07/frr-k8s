@@ -14,8 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	certutil "k8s.io/client-go/util/cert"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
+	watchermetrics "sigs.k8s.io/controller-runtime/pkg/certwatcher/metrics"
 )
 
 func TestForCertificatePair(t *testing.T) {
@@ -95,16 +97,21 @@ func TestSuppliedCertificateTrustAndReload(t *testing.T) {
 
 	// Rotation can briefly present a mismatched pair. Fresh handshakes must
 	// continue using the last valid certificate until both files are replaced.
+	// Keep this test serial: the dependency exposes a process-wide error counter.
+	errorsBefore := testutil.ToFloat64(watchermetrics.ReadCertificateErrors)
 	writeReplacement(t, certPath, cert2)
-	for range 3 {
-		got, err := dial()
-		if err != nil || !got.Equal(first) {
-			t.Fatalf("mismatched replacement did not retain original cert: %v", err)
+	deadline := time.Now().Add(15 * time.Second)
+	for testutil.ToFloat64(watchermetrics.ReadCertificateErrors) <= errorsBefore {
+		if time.Now().After(deadline) {
+			t.Fatal("watcher did not attempt the mismatched certificate reload")
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	if got, err := dial(); err != nil || !got.Equal(first) {
+		t.Fatalf("mismatched replacement did not retain original cert: %v", err)
+	}
 	writeReplacement(t, keyPath, key2)
-	deadline := time.Now().Add(15 * time.Second)
+	deadline = time.Now().Add(15 * time.Second)
 	for {
 		got, err := dial()
 		if err == nil && !got.Equal(first) {
