@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -74,7 +75,7 @@ func TestSuppliedCertificateTrustAndReload(t *testing.T) {
 	roots.AppendCertsFromPEM(cert2)
 	clientCfg := &tls.Config{RootCAs: roots, ServerName: "localhost", MinVersion: tls.VersionTLS13}
 	dial := func() (*x509.Certificate, error) {
-		conn, err := tls.Dial("tcp", server.Listener.Addr().String(), clientCfg)
+		conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 2 * time.Second}, "tcp", server.Listener.Addr().String(), clientCfg)
 		if err != nil {
 			return nil, err
 		}
@@ -87,7 +88,7 @@ func TestSuppliedCertificateTrustAndReload(t *testing.T) {
 	}
 	untrusted := clientCfg.Clone()
 	untrusted.RootCAs = x509.NewCertPool()
-	if conn, err := tls.Dial("tcp", server.Listener.Addr().String(), untrusted); err == nil {
+	if conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 2 * time.Second}, "tcp", server.Listener.Addr().String(), untrusted); err == nil {
 		conn.Close()
 		t.Fatal("untrusted certificate accepted")
 	}

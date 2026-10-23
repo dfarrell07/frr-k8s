@@ -134,6 +134,19 @@ func TestServeRejectsUnexpectedWatcherCompletion(t *testing.T) {
 	}
 }
 
+func TestServeClosesListenerOnTLSSetupFailure(t *testing.T) {
+	srv, listener, _ := testServer(t, http.NotFoundHandler())
+	// No certificate source makes ServeTLS fail before Serve registers the listener.
+	srv.TLSConfig.Certificates = nil
+	if err := serve(context.Background(), srv, listener, nil); err == nil {
+		t.Fatal("expected TLS setup to fail")
+	}
+	if conn, err := net.DialTimeout("tcp", listener.Addr().String(), time.Second); err == nil {
+		conn.Close()
+		t.Fatal("listener remained open after TLS setup failure")
+	}
+}
+
 func testServer(t *testing.T, handler http.Handler) (*http.Server, net.Listener, *http.Client) {
 	t.Helper()
 	opt, err := tlsconfig.OptFor("", "", "")

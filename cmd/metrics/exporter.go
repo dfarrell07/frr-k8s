@@ -115,6 +115,7 @@ func run(ctx context.Context) error {
 // queries still need their own cancellation and deadlines; closing a connection
 // cannot stop a handler blocked in a subprocess.
 func serve(ctx context.Context, srv *http.Server, listener net.Listener, watchResult <-chan error) error {
+	defer listener.Close()
 	serverResult := make(chan error, 1)
 	go func() {
 		serverResult <- srv.ServeTLS(listener, "", "")
