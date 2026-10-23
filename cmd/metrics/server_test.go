@@ -127,19 +127,23 @@ func TestServeClosesConnectionsOnDrainDeadline(t *testing.T) {
 
 func TestServeRejectsUnexpectedWatcherCompletion(t *testing.T) {
 	srv, listener, _ := testServer(t, http.NotFoundHandler())
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
 	watchResult := make(chan error, 1)
 	watchResult <- nil
-	if err := serve(context.Background(), srv, listener, watchResult); err == nil {
-		t.Fatal("unexpected watcher completion was ignored")
+	if err := serve(ctx, srv, listener, watchResult); err == nil || ctx.Err() != nil {
+		t.Fatalf("expected watcher failure before timeout: serve = %v, context = %v", err, ctx.Err())
 	}
 }
 
 func TestServeClosesListenerOnTLSSetupFailure(t *testing.T) {
 	srv, listener, _ := testServer(t, http.NotFoundHandler())
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
 	// No certificate source makes ServeTLS fail before Serve registers the listener.
 	srv.TLSConfig.Certificates = nil
-	if err := serve(context.Background(), srv, listener, nil); err == nil {
-		t.Fatal("expected TLS setup to fail")
+	if err := serve(ctx, srv, listener, nil); err == nil || ctx.Err() != nil {
+		t.Fatalf("expected TLS setup failure before timeout: serve = %v, context = %v", err, ctx.Err())
 	}
 	if conn, err := net.DialTimeout("tcp", listener.Addr().String(), time.Second); err == nil {
 		conn.Close()
@@ -161,6 +165,7 @@ func testServer(t *testing.T, handler http.Handler) (*http.Server, net.Listener,
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { listener.Close() })
 	srv := &http.Server{TLSConfig: cfg, Handler: handler, ReadTimeout: 3 * time.Second}
 	t.Cleanup(func() { srv.Close() })
 	// These shutdown tests intentionally use a generated ephemeral certificate;
