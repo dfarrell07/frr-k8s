@@ -56,7 +56,7 @@ func main() {
 	level.Info(logger).Log("version", version.Version(), "commit", version.CommitHash(), "branch", version.Branch(), "goversion", version.GoString(), "msg", "FRR metrics exporter starting "+version.String())
 
 	mux := http.NewServeMux()
-	metricsHandler, err := newMetricsHandler(*disableMetricsAuth, rbacFilter)
+	metricsHandler, err := newMetricsHandler(promHandler(), *disableMetricsAuth, rbacFilter)
 	if err != nil {
 		level.Error(logger).Log("msg", "failed to create metrics handler", "error", err)
 		os.Exit(1)
@@ -90,8 +90,7 @@ func main() {
 	}
 }
 
-func newMetricsHandler(disableAuth bool, filterFactory func() (metricsserver.Filter, error)) (http.Handler, error) {
-	handler := promHandler()
+func newMetricsHandler(handler http.Handler, disableAuth bool, filterFactory func() (metricsserver.Filter, error)) (http.Handler, error) {
 	if disableAuth {
 		return handler, nil
 	}
