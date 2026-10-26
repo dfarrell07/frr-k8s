@@ -414,6 +414,39 @@ frr-k8s-system   frr-k8s-worker2-rknwg   frr-k8s-worker2   10.89.0.66         Es
 frr-k8s-system   frr-k8s-worker2-t7rbf   frr-k8s-worker2   172.30.0.2         Established   Up
 ```
 
+## Running the metrics exporter outside a cluster
+
+`frr-metrics` reads FRR state with `/usr/bin/vtysh`, so it can also run on an FRR host
+that is not a Kubernetes node. The binary is `/frr-metrics` in the frr-k8s image, which
+has no `vtysh`; the Helm chart runs it in a container built from the FRR image. Run it
+where `/usr/bin/vtysh` works, as a user that can open the FRR VTY sockets (for example a
+member of the `frrvty` group).
+
+By default each request is checked with Kubernetes authentication and authorization,
+and the exporter exits at startup without in-cluster config. Outside a cluster, disable
+the check:
+
+```bash
+frr-metrics --disable-metrics-auth --metrics-bind-address=127.0.0.1
+curl -k https://127.0.0.1:9141/metrics
+```
+
+Anyone who can reach the listener can then read the metrics, and each scrape runs
+several `vtysh` commands. The default bind address `0.0.0.0` listens on every IPv4 and
+IPv6 address, so bind to loopback or a management address (IPv6 in brackets, e.g.
+`--metrics-bind-address='[::1]'`) and restrict access with a firewall for both address
+families.
+
+The listener stays HTTPS. Unless both `--tls-cert-file` and `--tls-private-key-file` are
+set, a new certificate is generated in memory at each start and scrapers cannot verify
+it. For remote scraping, use a certificate that covers the host name or IP address
+Prometheus scrapes, and configure Prometheus with `scheme: https` and
+`tls_config.ca_file`.
+
+If `vtysh` fails or prints anything besides JSON (for example a warning about a missing
+`/etc/frr/vtysh.conf`), the scrape still succeeds without the `frrk8s_*` series and the
+log shows `failed to fetch` errors, so alert on those series being absent.
+
 ## Blocking prefixes that may break the cluster
 
 The controller accepts a --always-block parameter that accepts a list of comma separated cidrs. When enabled, FRR-K8s will instruct the FRR instance to always refuse those prefixes. It is useful to reject prefixes that might harm the cluster, overriding routes to ClusterIPs or the IPs of the Pods.

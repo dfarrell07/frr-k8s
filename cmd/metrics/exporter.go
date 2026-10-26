@@ -31,6 +31,7 @@ var (
 	metricsPort         = flag.Uint("metrics-port", 9141, "Port to listen on for web interface.")
 	metricsBindAddress  = flag.String("metrics-bind-address", "0.0.0.0", "The address the metric endpoint binds to")
 	metricsPath         = flag.String("metrics-path", "/metrics", "Path under which to expose metrics.")
+	disableMetricsAuth  = flag.Bool("disable-metrics-auth", false, "Serve metrics without Kubernetes authentication and authorization, for use outside a cluster. Anyone who can reach the listener can read metrics.")
 	tlsCertFile         = flag.String("tls-cert-file", "", "x509 certificate for HTTPS. If empty, a self-signed cert is auto-generated.")
 	tlsKeyFile          = flag.String("tls-private-key-file", "", "x509 private key matching --tls-cert-file.")
 	tlsCipherSuites     = flag.String("tls-cipher-suites", "", "Comma-separated list of TLS cipher suites. If empty, uses Go defaults.")
@@ -51,7 +52,7 @@ func main() {
 	level.Info(logger).Log("version", version.Version(), "commit", version.CommitHash(), "branch", version.Branch(), "goversion", version.GoString(), "msg", "FRR metrics exporter starting "+version.String())
 
 	mux := http.NewServeMux()
-	metricsHandler, err := newMetricsHandler()
+	metricsHandler, err := newMetricsHandler(*disableMetricsAuth, promHandler(), rbacFilter)
 	if err != nil {
 		level.Error(logger).Log("msg", "failed to create metrics handler", "error", err)
 		os.Exit(1)
@@ -78,6 +79,9 @@ func main() {
 	}
 
 	level.Info(logger).Log("msg", "Starting exporter", "metricsPath", *metricsPath, "port", *metricsPort)
+	if *disableMetricsAuth {
+		level.Error(logger).Log("msg", "Kubernetes authentication and authorization disabled for metrics; anyone who can reach the listener can read them", "bindAddress", *metricsBindAddress, "port", *metricsPort)
+	}
 
 	if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 		level.Error(logger).Log("error", err)
@@ -85,9 +89,11 @@ func main() {
 	}
 }
 
-func newMetricsHandler() (http.Handler, error) {
-	handler := promHandler()
-	filter, err := rbacFilter()
+func newMetricsHandler(disableAuth bool, handler http.Handler, filterFactory func() (metricsserver.Filter, error)) (http.Handler, error) {
+	if disableAuth {
+		return handler, nil
+	}
+	filter, err := filterFactory()
 	if err != nil {
 		return nil, err
 	}
