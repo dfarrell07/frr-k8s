@@ -3,6 +3,8 @@
 package vtysh
 
 import (
+	"bytes"
+	"fmt"
 	"os/exec"
 
 	"github.com/metallb/frr-k8s/internal/frr"
@@ -10,8 +12,28 @@ import (
 
 type Cli func(args string) (string, error)
 
+// Run returns the stdout of a vtysh command. The vtysh binary can warn on
+// stderr and still succeed, so stderr appears only in the error on failure,
+// falling back to stdout, where vtysh reports errors such as unknown commands.
 func Run(args string) (string, error) {
-	out, err := exec.Command("/usr/bin/vtysh", "-c", args).CombinedOutput() //#nosec G204 -- args are hardcoded vtysh commands from within this package
+	return run("/usr/bin/vtysh", args)
+}
+
+func run(path, args string) (string, error) {
+	var stderr bytes.Buffer
+	cmd := exec.Command(path, "-c", args) //#nosec G204 -- path is fixed outside tests and args are vtysh commands built in this package
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		detail := bytes.TrimSpace(stderr.Bytes())
+		if len(detail) == 0 {
+			detail = bytes.TrimSpace(out)
+		}
+		if len(detail) > 0 {
+			err = fmt.Errorf("%w: %s", err, detail)
+		}
+		err = fmt.Errorf("vtysh -c %q: %w", args, err)
+	}
 	return string(out), err
 }
 
