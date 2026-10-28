@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	stdlog "log"
@@ -64,7 +65,8 @@ func main() {
 		level.Error(logger).Log("msg", "failed to parse TLS flags", "error", err)
 		os.Exit(1)
 	}
-	tlsCfg, err := tlsconfig.For(tlsOpt, *tlsCertFile, *tlsKeyFile)
+	ctx := ctrl.SetupSignalHandler()
+	tlsCfg, err := tlsconfig.For(ctx, tlsOpt, *tlsCertFile, *tlsKeyFile)
 	if err != nil {
 		level.Error(logger).Log("msg", "failed to configure TLS", "error", err)
 		os.Exit(1)
@@ -79,9 +81,18 @@ func main() {
 
 	level.Info(logger).Log("msg", "Starting exporter", "metricsPath", *metricsPath, "port", *metricsPort)
 
-	if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
-		level.Error(logger).Log("error", err)
-		os.Exit(1)
+	go func() {
+		if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+			level.Error(logger).Log("error", err)
+			os.Exit(1)
+		}
+	}()
+
+	<-ctx.Done()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		level.Error(logger).Log("msg", "failed to shut down exporter", "error", err)
 	}
 }
 

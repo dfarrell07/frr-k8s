@@ -7,8 +7,6 @@ import (
 	"crypto/tls"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
 
 	certutil "k8s.io/client-go/util/cert"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
@@ -16,14 +14,14 @@ import (
 
 // For builds a *tls.Config by applying the given TLS option function.
 // If certFile and keyFile are provided, a background certwatcher goroutine
-// is started to hot-reload them on change. Otherwise, a self-signed
-// certificate is generated in memory once.
-func For(tlsOpt func(*tls.Config), certFile, keyFile string) (*tls.Config, error) {
+// is started to hot-reload them on change until ctx is done. Otherwise, a
+// self-signed certificate is generated in memory once.
+func For(ctx context.Context, tlsOpt func(*tls.Config), certFile, keyFile string) (*tls.Config, error) {
 	cfg := &tls.Config{}
 	tlsOpt(cfg)
 
 	if certFile != "" && keyFile != "" {
-		return withCertWatcher(cfg, certFile, keyFile)
+		return withCertWatcher(ctx, cfg, certFile, keyFile)
 	}
 	return withSelfSigned(cfg)
 }
@@ -56,9 +54,7 @@ func withSelfSigned(cfg *tls.Config) (*tls.Config, error) {
 	return cfg, nil
 }
 
-func withCertWatcher(cfg *tls.Config, certFile, keyFile string) (*tls.Config, error) {
-	ctx, _ := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-
+func withCertWatcher(ctx context.Context, cfg *tls.Config, certFile, keyFile string) (*tls.Config, error) {
 	cw, err := certwatcher.New(certFile, keyFile)
 	if err != nil {
 		return nil, fmt.Errorf("creating cert watcher: %w", err)
