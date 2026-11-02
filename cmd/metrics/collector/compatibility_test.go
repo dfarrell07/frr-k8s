@@ -15,8 +15,9 @@ import (
 )
 
 func TestExistingMetricContract(t *testing.T) {
-	// Keep names, types, HELP and labels stable. Distinct counter values in copies
-	// of real captures also catch swapped JSON-to-metric mappings.
+	// Keep names, types and HELP stable. BGP labels stay unchanged; BFD
+	// intentionally adds full identity labels. Distinct values in copies of
+	// real captures also catch swapped JSON-to-metric mappings.
 	contract := []struct {
 		name, help, key, kind string
 		value                 int
@@ -65,7 +66,7 @@ func TestExistingMetricContract(t *testing.T) {
 		labels := `peer="10.78.0.3",vrf="default"`
 		counters := bgp["default"]["10.78.0.3"].(map[string]any)["messageStats"].(map[string]any)
 		if strings.HasPrefix(m.name, "bfd_") {
-			labels = `peer="10.78.0.3",vrf="default"`
+			labels = `interface="eth0",local="10.78.0.2",multihop="false",peer="10.78.0.3",vrf="default"`
 			counters = bfd[0]
 		}
 		if m.key != "" {

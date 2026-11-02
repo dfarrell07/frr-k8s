@@ -286,7 +286,7 @@ func TestBFDFromRealFRR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const id = `{peer="10.78.0.3",vrf="default"}`
+	const id = `{interface="eth0",local="10.78.0.2",multihop="false",peer="10.78.0.3",vrf="default"}`
 	expect(t, series(t, ms), map[string]float64{
 		"frrk8s_bfd_session_up" + id:           1,
 		"frrk8s_bfd_control_packet_input" + id: 107,
@@ -300,11 +300,29 @@ const (
 	countersCmd = "show bfd peers counters json"
 )
 
-func TestBFDAmbiguousLegacyLabelsFailAtomically(t *testing.T) {
+func TestBFDSessionsToOnePeerAndBFDOnlyVRFFromRealFRR(t *testing.T) {
+	// Four sessions to one peer, including a BFD-only VRF, plus a session
+	// without a local address or interface. No BGP discovery read is available.
 	ms, err := collectBFD(context.Background(), fake(map[string]string{
 		peersCmd: "@bfd_identity_peers.json", countersCmd: "@bfd_identity_counters.json"}))
-	if err == nil || len(ms) != 0 {
-		t.Fatalf("ambiguous peer/VRF identity emitted %d metrics, error %v", len(ms), err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := series(t, ms)
+	for _, labels := range []string{
+		`{interface="dummy0",local="192.0.2.10",multihop="false",peer="192.0.2.1",vrf="default"}`,
+		`{interface="",local="192.0.2.11",multihop="true",peer="192.0.2.1",vrf="default"}`,
+		`{interface="",local="192.0.2.12",multihop="true",peer="192.0.2.1",vrf="default"}`,
+		`{interface="dummy-blue",local="192.0.2.20",multihop="false",peer="192.0.2.1",vrf="blue"}`,
+		`{interface="",local="",multihop="false",peer="192.0.2.2",vrf="default"}`,
+	} {
+		expect(t, got, map[string]float64{
+			"frrk8s_bfd_session_up" + labels:           0,
+			"frrk8s_bfd_control_packet_input" + labels: 0,
+		})
+	}
+	if len(got) != 5*8 {
+		t.Errorf("got %d series, want 8 for each of 5 sessions", len(got))
 	}
 }
 
@@ -377,7 +395,7 @@ func TestBFDMissingCounterIsOmittedNotZero(t *testing.T) {
 	}
 	got := series(t, ms)
 	expect(t, got, map[string]float64{
-		`frrk8s_bfd_control_packet_input{peer="192.0.2.1",vrf="default"}`: 9})
+		`frrk8s_bfd_control_packet_input{interface="eth0",local="192.0.2.10",multihop="false",peer="192.0.2.1",vrf="default"}`: 9})
 	absent(t, got, "frrk8s_bfd_echo_", "frrk8s_bfd_zebra", "frrk8s_bfd_control_packet_output", "frrk8s_bfd_session_up_events", "frrk8s_bfd_session_down_events")
 }
 
@@ -389,7 +407,7 @@ func TestBFDMultihopFromRealFRR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const id = `{peer="10.80.0.3",vrf="default"}`
+	const id = `{interface="",local="10.80.0.2",multihop="true",peer="10.80.0.3",vrf="default"}`
 	expect(t, series(t, ms), map[string]float64{
 		"frrk8s_bfd_session_up" + id:           1,
 		"frrk8s_bfd_control_packet_input" + id: 49,
