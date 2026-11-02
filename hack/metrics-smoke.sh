@@ -211,6 +211,7 @@ mh r1 -c 'evpn mh es-id 1'
 out=$(scrape)
 check frrk8s_evpn_es_oper_up 1 "$esi"
 [ -z "$(val frrk8s_evpn_es_df)" ] || fail 'pending election was assigned a DF role'
+roles 0 1
 podman exec "${lab}-r1" ip link del vxlan10100
 wait_for frrk8s_evpn_vni_info '' 'vni="10100"'
 check frrk8s_evpn_es_oper_up 1 "$esi"
@@ -224,7 +225,7 @@ echo 'ok: bypass, port down, remote-only ES, pending election and VNI deletion n
 for pair in bfdd:bfd bgpd:bgp zebra:evpn; do
   daemon=${pair%:*} collector=${pair#*:}
   podman exec "${lab}-r1" sh -c 'kill -STOP "$(cat "/run/frr/$1.pid")"' sh "$daemon"
-  out=$(scrape -H 'X-Prometheus-Scrape-Timeout-Seconds: 1') || fail "scrape hung or failed with $daemon stopped"
+  out=$(scrape --max-time 2 -H 'X-Prometheus-Scrape-Timeout-Seconds: 1') || fail "scrape hung or failed with $daemon stopped"
   for c in bgp bfd evpn; do
     want=1; [ "$c" != "$collector" ] || want=0
     check frrk8s_scrape_collector_success "$want" "collector=\"$c\""

@@ -42,7 +42,7 @@ func Handler(frrCli func(context.Context, string) ([]byte, error), logger log.Lo
 			delete(expected, d)
 		}
 		if len(expected) > 0 {
-			logger.Log("daemons not running. got: ", res, "missing: ", expected)
+			logger.Log("daemons not running. got: ", string(res), "missing: ", expected)
 			http.NotFound(w, r)
 		}
 	})

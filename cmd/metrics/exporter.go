@@ -34,7 +34,7 @@ var (
 	metricsPort         = flag.Uint("metrics-port", 9141, "Port to listen on for web interface.")
 	metricsBindAddress  = flag.String("metrics-bind-address", "0.0.0.0", "The address the metric endpoint binds to")
 	metricsPath         = flag.String("metrics-path", "/metrics", "Path under which to expose metrics.")
-	disableMetricsAuth  = flag.Bool("disable-metrics-auth", false, "Serve metrics without Kubernetes authentication and authorization, e.g. outside a cluster. Anyone who can reach the listener can read them.")
+	disableMetricsAuth  = flag.Bool("disable-metrics-auth", false, "Disable Kubernetes authentication and authorization. Without --tls-client-ca-file, anyone who can reach the listener can read metrics.")
 	tlsClientCAFile     = flag.String("tls-client-ca-file", "", "CA for required standalone scraper certificates. Requires --disable-metrics-auth and an explicit server key pair.")
 	tlsCertFile         = flag.String("tls-cert-file", "", "x509 certificate for HTTPS. If empty, a self-signed cert is auto-generated.")
 	tlsKeyFile          = flag.String("tls-private-key-file", "", "x509 private key matching --tls-cert-file.")
@@ -99,7 +99,7 @@ func main() {
 
 	level.Info(logger).Log("msg", "Starting exporter", "metricsPath", *metricsPath, "port", *metricsPort, "metricsAuthDisabled", *disableMetricsAuth)
 
-	if err := serve(ctx, srv, 5*time.Second); err != nil && err != http.ErrServerClosed {
+	if err := serve(ctx, srv, 5*time.Second); err != nil {
 		level.Error(logger).Log("error", err)
 		os.Exit(1)
 	}

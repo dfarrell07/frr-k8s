@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -85,12 +86,10 @@ func start(t *testing.T, c tlsFiles) (string, func()) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ca := &clientCA{base: cfg, file: c.clientCAFile, logger: discard}
-	if _, err := ca.get(nil); err != nil {
+	cfg, err = withClientCA(cfg, c.clientCAFile, discard)
+	if err != nil {
 		t.Fatal(err)
 	}
-	cfg = cfg.Clone()
-	cfg.GetConfigForClient = ca.get
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -98,7 +97,7 @@ func start(t *testing.T, c tlsFiles) (string, func()) {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", newExporter(quiet, time.Second))
 	ctx, cancel := context.WithCancel(context.Background())
-	srv := &http.Server{Handler: mux, TLSConfig: cfg, ReadTimeout: time.Second, WriteTimeout: 2 * time.Second}
+	srv := &http.Server{Handler: mux, TLSConfig: cfg, ReadTimeout: time.Second, WriteTimeout: 2 * time.Second, IdleTimeout: 2 * time.Minute}
 	done := make(chan error, 1)
 	go func() { done <- serveListener(ctx, srv, listener, time.Second) }()
 	return listener.Addr().String(), func() {
@@ -116,13 +115,16 @@ func start(t *testing.T, c tlsFiles) (string, func()) {
 func get(addr string, tc *tls.Config) (*x509.Certificate, error) {
 	cl := &http.Client{Transport: &http.Transport{TLSClientConfig: tc}, Timeout: 5 * time.Second}
 	defer cl.CloseIdleConnections()
-	resp, err := cl.Get("https://" + addr + "/")
+	resp, err := cl.Get("https://" + addr + "/metrics")
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
 		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("scrape status %d", resp.StatusCode)
 	}
 	return resp.TLS.PeerCertificates[0], nil
 }
@@ -194,8 +196,15 @@ func TestMutualTLSAndRotation(t *testing.T) {
 	write(t, cfg.certFile, crt)
 	write(t, cfg.keyFile, key)
 	write(t, cfg.clientCAFile, np.pem)
-	if _, err := get(addr, good); err == nil {
-		t.Error("a client from the replaced CA was still served")
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		if _, err := get(addr, good); err != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("old client CA was still trusted after reload interval")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	nc, nk := np.issue(t, "scraper-2", 6)
 	newPair, _ := tls.X509KeyPair(nc, nk)
@@ -255,8 +264,16 @@ func TestClientCARotationForReusedAndResumedConnections(t *testing.T) {
 	write(t, cfg.clientCAFile, newPKI(t).pem)
 	fresh := &http.Client{Transport: &http.Transport{TLSClientConfig: tc.Clone()}, Timeout: 5 * time.Second}
 	defer fresh.CloseIdleConnections()
-	if _, _, err := scrape(fresh); err == nil {
-		t.Fatal("old client was accepted on a new TLS connection after CA replacement")
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		fresh.CloseIdleConnections()
+		if _, _, err := scrape(fresh); err != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("old client was accepted on a new TLS connection after CA replacement")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	// Existing connections retain the authentication established at their handshake.
 	if _, reused, err := scrape(client); err != nil || !reused {
