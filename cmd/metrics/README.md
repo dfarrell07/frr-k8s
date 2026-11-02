@@ -22,7 +22,9 @@ the daemons you run; selection does not change `/livez` requirements below.
 | `frrk8s_scrape_collector_success`, `_duration_seconds` | `collector` | Gauges: success is 1 for a complete read and parse, otherwise 0; duration is elapsed seconds. Both remain present on failure |
 
 BFD intentionally adds `local,interface,multihop` to the existing `peer,vrf`
-labels: migrate BFD-to-BFD joins and expected-session inventory to all five.
+labels: update BFD series joins and expected-session inventory for all five.
+Numbered BGP/BFD joins need `on(peer,vrf)` and grouping when multiple BFD
+sessions share a peer; unnumbered peers need an interface/address mapping.
 BFD-only VRFs are included. IDs correlate the two bulk
 reads and are never time-series labels. Missing/recreated sessions or duplicate
 identities fail the entire BFD collector for that scrape. Named/SBFD sessions

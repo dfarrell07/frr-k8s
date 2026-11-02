@@ -15,8 +15,9 @@ import (
 )
 
 func TestExistingMetricContract(t *testing.T) {
-	// Keep names, types, HELP and labels stable. Distinct counter values in copies
-	// of real captures also catch swapped JSON-to-metric mappings.
+	// Keep names, types and HELP stable. BGP labels stay unchanged; BFD
+	// intentionally adds full identity labels. Distinct values in copies of
+	// real captures also catch swapped JSON-to-metric mappings.
 	contract := []struct {
 		name, help, key, kind string
 		value                 int
