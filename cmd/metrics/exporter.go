@@ -35,6 +35,7 @@ var (
 	metricsBindAddress  = flag.String("metrics-bind-address", "0.0.0.0", "The address the metric endpoint binds to")
 	metricsPath         = flag.String("metrics-path", "/metrics", "Path under which to expose metrics.")
 	disableMetricsAuth  = flag.Bool("disable-metrics-auth", false, "Serve metrics without Kubernetes authentication and authorization, e.g. outside a cluster. Anyone who can reach the listener can read them.")
+	tlsClientCAFile     = flag.String("tls-client-ca-file", "", "CA for required standalone scraper certificates. Requires --disable-metrics-auth and an explicit server key pair.")
 	tlsCertFile         = flag.String("tls-cert-file", "", "x509 certificate for HTTPS. If empty, a self-signed cert is auto-generated.")
 	tlsKeyFile          = flag.String("tls-private-key-file", "", "x509 private key matching --tls-cert-file.")
 	tlsCipherSuites     = flag.String("tls-cipher-suites", "", "Comma-separated list of TLS cipher suites. If empty, uses Go defaults.")
@@ -70,12 +71,23 @@ func main() {
 		level.Error(logger).Log("msg", "failed to parse TLS flags", "error", err)
 		os.Exit(1)
 	}
-	tlsCfg, err := tlsconfig.For(tlsOpt, *tlsCertFile, *tlsKeyFile)
+	if err := validateAccess(*disableMetricsAuth, *tlsClientCAFile, *tlsCertFile, *tlsKeyFile); err != nil {
+		level.Error(logger).Log("msg", "invalid metrics access flags", "error", err)
+		os.Exit(1)
+	}
+	tlsCfg, err := tlsconfig.ForContext(ctx, tlsOpt, *tlsCertFile, *tlsKeyFile)
 	if err != nil {
 		level.Error(logger).Log("msg", "failed to configure TLS", "error", err)
 		os.Exit(1)
 	}
 
+	if *tlsClientCAFile != "" {
+		tlsCfg, err = withClientCA(tlsCfg, *tlsClientCAFile, logger)
+		if err != nil {
+			level.Error(logger).Log("msg", "failed to configure client CA", "error", err)
+			os.Exit(1)
+		}
+	}
 	srv := &http.Server{
 		Addr:         net.JoinHostPort(*metricsBindAddress, fmt.Sprint(*metricsPort)),
 		ReadTimeout:  3 * time.Second,
@@ -130,4 +142,16 @@ func rbacFilter() (metricsserver.Filter, error) {
 		return nil, fmt.Errorf("creating HTTP client: %w", err)
 	}
 	return filters.WithAuthenticationAndAuthorization(config, httpClient)
+}
+
+// validateAccess keeps Kubernetes authentication as the default; standalone
+// mTLS is explicit and requires a stable server identity scrapers can trust.
+func validateAccess(disableAuth bool, ca, cert, key string) error {
+	if (cert == "") != (key == "") {
+		return fmt.Errorf("tls-cert-file and tls-private-key-file must be supplied together")
+	}
+	if ca != "" && (!disableAuth || cert == "" || key == "") {
+		return fmt.Errorf("tls-client-ca-file requires disable-metrics-auth and an explicit server certificate and key")
+	}
+	return nil
 }

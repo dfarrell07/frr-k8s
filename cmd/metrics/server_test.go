@@ -20,7 +20,7 @@ func startServer(t *testing.T, handler http.Handler, grace time.Duration) (strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := tlsconfig.For(opt, "", "")
+	cfg, err := tlsconfig.ForContext(t.Context(), opt, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestShutdownDrainsActiveRequest(t *testing.T) {
 		close(started)
 		<-release
 		if r.Context().Err() != nil {
-			t.Error("cancelled during grace period")
+			t.Error("canceled during grace period")
 		}
 		_, _ = io.WriteString(w, "drained")
 	}), time.Second)
@@ -134,5 +134,22 @@ func TestIncompleteBodyCannotHoldAResponseSlot(t *testing.T) {
 	stop()
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestShutdownBeforeServingDoesNotLeaveAListener(t *testing.T) {
+	addr, stop, done := startServer(t, http.NotFoundHandler(), time.Second)
+	stop()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("startup shutdown hung")
+	}
+	if conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond); err == nil {
+		conn.Close()
+		t.Fatal("listener survived shutdown")
 	}
 }

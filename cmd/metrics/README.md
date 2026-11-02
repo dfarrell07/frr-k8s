@@ -62,3 +62,33 @@ neighbors and up to 16,384 VNI/VTEP memberships. The CLI output limit bounds
 input, not an appliance capacity claim. Named/SBFD identity needs qualification.
 BFD RTT is omitted: the available echo-window fields cannot establish general
 transport latency.
+
+## Standalone authentication
+
+For a host outside Kubernetes, require a trusted client certificate:
+
+```sh
+frr-metrics --disable-metrics-auth --collectors=bgp,bfd,evpn \
+  --metrics-bind-address=0.0.0.0 \
+  --tls-cert-file=/etc/frr-metrics/server.crt \
+  --tls-private-key-file=/etc/frr-metrics/server.key \
+  --tls-client-ca-file=/etc/frr-metrics/scraper-ca.crt
+```
+
+In another terminal, scrape with `curl --cacert server-ca.crt --cert scraper.crt
+--key scraper.key https://HOST:9141/metrics`. The server certificate must have a
+SAN matching HOST. Use a CA dedicated to scrapers: any client certificate from
+that CA grants access. This mode requires an explicit server key pair and
+cannot replace Kubernetes authentication unless `--disable-metrics-auth` is set.
+Supplying only one server key-pair flag now fails at startup instead of
+falling back to a generated certificate. Without the client CA flag, the opt-in
+unauthenticated HTTPS mode remains
+available for loopback/proxy deployments.
+
+Existing TLS cipher, curve and minimum-version flags still apply (TLS 1.3 by
+default). The existing certificate watcher reloads the server key pair; client
+trust is re-read at TLS handshakes at most once a second. Invalid, empty or
+missing CA replacements keep the last good trust and log an error. New
+connections, including resumed TLS sessions, use the new CA; already authenticated
+keep-alive connections retain access. Restart to close existing connections when
+removing trust. This does not implement certificate revocation lists.

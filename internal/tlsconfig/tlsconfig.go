@@ -19,11 +19,22 @@ import (
 // is started to hot-reload them on change. Otherwise, a self-signed
 // certificate is generated in memory once.
 func For(tlsOpt func(*tls.Config), certFile, keyFile string) (*tls.Config, error) {
+	ctx := context.Background()
+	if certFile != "" && keyFile != "" {
+		ctx, _ = signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)
+	}
+	return ForContext(ctx, tlsOpt, certFile, keyFile)
+}
+
+// ForContext is For with a caller-owned lifetime for certificate watching.
+func ForContext(ctx context.Context, tlsOpt func(*tls.Config), certFile, keyFile string) (*tls.Config, error) {
 	cfg := &tls.Config{}
 	tlsOpt(cfg)
-
-	if certFile != "" && keyFile != "" {
-		return withCertWatcher(cfg, certFile, keyFile)
+	if (certFile == "") != (keyFile == "") {
+		return nil, fmt.Errorf("certificate and private key must be supplied together")
+	}
+	if certFile != "" {
+		return withCertWatcher(ctx, cfg, certFile, keyFile)
 	}
 	return withSelfSigned(cfg)
 }
@@ -56,9 +67,7 @@ func withSelfSigned(cfg *tls.Config) (*tls.Config, error) {
 	return cfg, nil
 }
 
-func withCertWatcher(cfg *tls.Config, certFile, keyFile string) (*tls.Config, error) {
-	ctx, _ := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-
+func withCertWatcher(ctx context.Context, cfg *tls.Config, certFile, keyFile string) (*tls.Config, error) {
 	cw, err := certwatcher.New(certFile, keyFile)
 	if err != nil {
 		return nil, fmt.Errorf("creating cert watcher: %w", err)
