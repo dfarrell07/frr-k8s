@@ -34,7 +34,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
   CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=$VARIANT \
   go build -v -o /build/frr-metrics \
   -ldflags "-X 'github.com/metallb/frr-k8s/internal/version.gitCommit=${GIT_COMMIT}' -X 'github.com/metallb/frr-k8s/internal/version.gitBranch=${GIT_BRANCH}'" \
-  cmd/metrics/exporter.go \
+  ./cmd/metrics \
   && \
   # build frr status
   CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=$VARIANT \
