@@ -219,6 +219,10 @@ func TestMalformedReadsEmitNothing(t *testing.T) {
 		"bfd null peers":    {all[1], map[string]string{peersCmd: "null", countersCmd: "[]"}},
 		"bfd null counters": {all[1], map[string]string{peersCmd: "[]", countersCmd: "null"}},
 		"bfd command fails": {all[1], map[string]string{"show bfd peers json": "[]"}},
+		"evpn not json":     {all[2], map[string]string{"show evpn vni json": "<html>"}},
+		"evpn null":         {all[2], map[string]string{"show evpn vni json": "null"}},
+		"evpn empty vni":    {all[2], map[string]string{"show evpn vni json": `{"not-a-vni":{}}`}},
+		"evpn wrong shape":  {all[2], map[string]string{"show evpn vni json": "[1]"}},
 	} {
 		ms := Gather(context.Background(), fake(tc.replies), []Collector{tc.c}, discard)
 		got := series(t, ms)
@@ -237,6 +241,7 @@ func TestMalformedReadsEmitNothing(t *testing.T) {
 func TestCorruptFixtureFieldsFailOnlyTheirCollector(t *testing.T) {
 	// Corrupt real captures: unknown/absent measurements must not turn into
 	// zero, and malformed identities must not become plausible inventory.
+	const evpnCmd = "show evpn vni json"
 	for _, tc := range []struct {
 		name, collector, command, from, to string
 	}{
@@ -255,10 +260,23 @@ func TestCorruptFixtureFieldsFailOnlyTheirCollector(t *testing.T) {
 		{"bfd counter missing mode", "bfd", countersCmd, `"multihop":false`, `"multihop":null`},
 		{"bfd negative counter", "bfd", countersCmd, `"control-packet-input":107`, `"control-packet-input":-1`},
 		{"bfd fractional counter", "bfd", countersCmd, `"control-packet-input":107`, `"control-packet-input":1.5`},
+		{"evpn invalid key", "evpn", evpnCmd, `"10100":`, `"not-a-vni":`},
+		{"evpn mismatched key", "evpn", evpnCmd, `"vni":10100`, `"vni":10101`},
+		{"evpn zero vni", "evpn", evpnCmd, "\"10100\":{\n    \"vni\":10100", "\"0\":{\n    \"vni\":0"},
+		{"evpn out of range", "evpn", evpnCmd, "\"10100\":{\n    \"vni\":10100", "\"16777216\":{\n    \"vni\":16777216"},
+		{"evpn missing type", "evpn", evpnCmd, `"type":"L2"`, `"type":null`},
+		{"evpn invalid type", "evpn", evpnCmd, `"type":"L2"`, `"type":"other"`},
+		{"evpn missing vrf", "evpn", evpnCmd, `"tenantVrf":"default"`, `"tenantVrf":null`},
+		{"evpn missing interface", "evpn", evpnCmd, `"vxlanIf":"vxlan10100"`, `"vxlanIf":null`},
+		{"evpn negative macs", "evpn", evpnCmd, `"numMacs":1`, `"numMacs":-1`},
+		{"evpn fractional neighbors", "evpn", evpnCmd, `"numArpNd":0`, `"numArpNd":0.5`},
+		{"evpn negative vteps", "evpn", evpnCmd, `"numRemoteVteps":1`, `"numRemoteVteps":-1`},
+		{"evpn fractional vteps", "evpn", evpnCmd, `"numRemoteVteps":1`, `"numRemoteVteps":1.5`},
+		{"evpn invalid vteps", "evpn", evpnCmd, `"numRemoteVteps":1`, `"numRemoteVteps":"n/a"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			replies := map[string]string{bgpCmd: "@bgp_neighbors.json", peersCmd: "@bfd_peers.json",
-				countersCmd: "@bfd_counters.json"}
+				countersCmd: "@bfd_counters.json", evpnCmd: "@evpn_vni.json"}
 			raw, err := fake(replies)(context.Background(), tc.command)
 			if err != nil {
 				t.Fatal(err)
@@ -431,11 +449,12 @@ func TestBFDSessionWithoutStatusIsMalformed(t *testing.T) {
 }
 
 func TestOneFailingCollectorDoesNotHideTheOthers(t *testing.T) {
-	run := fake(map[string]string{bgpCmd: "@bgp_neighbors.json"}) // no BFD
+	run := fake(map[string]string{bgpCmd: "@bgp_neighbors.json", "show evpn vni json": "@evpn_vni.json"}) // no BFD
 	got := series(t, Gather(context.Background(), run, all, discard))
 	expect(t, got, map[string]float64{
-		`frrk8s_scrape_collector_success{collector="bgp"}`: 1,
-		`frrk8s_scrape_collector_success{collector="bfd"}`: 0,
+		`frrk8s_scrape_collector_success{collector="bgp"}`:  1,
+		`frrk8s_scrape_collector_success{collector="bfd"}`:  0,
+		`frrk8s_scrape_collector_success{collector="evpn"}`: 1,
 	})
 	for _, c := range all {
 		if _, ok := got[fmt.Sprintf(`frrk8s_scrape_collector_duration_seconds{collector=%q}`, c.Name)]; !ok {
@@ -446,11 +465,11 @@ func TestOneFailingCollectorDoesNotHideTheOthers(t *testing.T) {
 }
 
 func TestSelectCollectors(t *testing.T) {
-	cs, err := Select("bgp, bfd")
-	if err != nil || len(cs) != 2 || cs[1].Name != "bfd" {
+	cs, err := Select("bgp, evpn")
+	if err != nil || len(cs) != 2 || cs[1].Name != "evpn" {
 		t.Errorf("got %v, %v", cs, err)
 	}
-	for _, bad := range []string{"bgp,ospf", "", "bgp,bgp", "bgp,,bfd"} {
+	for _, bad := range []string{"bgp,ospf", "", "bgp,bgp", "bgp,,evpn"} {
 		if _, err := Select(bad); err == nil {
 			t.Errorf("Select(%q) accepted", bad)
 		}
@@ -495,10 +514,10 @@ func TestCanceledCollectorCannotPublishASuccessfulSnapshot(t *testing.T) {
 }
 
 func TestCancellationStopsAtEachSuccessfulRead(t *testing.T) {
-	replies := map[string]string{bgpCmd: "@bgp_neighbors.json", peersCmd: "@bfd_peers.json", countersCmd: "@bfd_counters.json"}
+	replies := map[string]string{bgpCmd: "@bgp_neighbors.json", peersCmd: "@bfd_peers.json", countersCmd: "@bfd_counters.json", vniCmd: "@evpn_vni.json"}
 	for _, c := range all {
 		reads := 2
-		if c.Name == "bgp" {
+		if c.Name == "bgp" || c.Name == "evpn" {
 			reads = 1
 		}
 		for at := 1; at <= reads; at++ {
@@ -559,13 +578,4 @@ func TestBFDSBFDDoesNotSatisfyOrdinarySessionHealth(t *testing.T) {
 		expect(t, got, map[string]float64{`frrk8s_scrape_collector_success{collector="bfd"}`: 0})
 		absent(t, got, "frrk8s_bfd_")
 	}
-}
-
-func encodeJSON(t *testing.T, value any) string {
-	t.Helper()
-	raw, err := json.Marshal(value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(raw)
 }

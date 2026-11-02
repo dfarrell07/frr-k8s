@@ -42,6 +42,7 @@ type Collector struct {
 var all = []Collector{
 	{"bgp", collectBGP},
 	{"bfd", collectBFD},
+	{"evpn", collectEVPN},
 }
 
 // Select resolves a comma-separated list such as "bgp,evpn".

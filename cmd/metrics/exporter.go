@@ -29,7 +29,7 @@ import (
 )
 
 var (
-	collectorNames      = flag.String("collectors", "bgp,bfd", "Comma-separated collectors: bgp,bfd.")
+	collectorNames      = flag.String("collectors", "bgp,bfd", "Comma-separated collectors: bgp,bfd,evpn. EVPN is opt-in.")
 	scrapeTimeout       = flag.Duration("scrape-timeout", 8*time.Second, "Deadline for all FRR reads per scrape; keep below the scraper timeout.")
 	metricsPort         = flag.Uint("metrics-port", 9141, "Port to listen on for web interface.")
 	metricsBindAddress  = flag.String("metrics-bind-address", "0.0.0.0", "The address the metric endpoint binds to")
