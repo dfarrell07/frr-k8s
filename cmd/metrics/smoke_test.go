@@ -32,7 +32,7 @@ if [ "$1" = run ] || [ "$1" = rm ]; then exit 1; fi`,
 		log := filepath.Join(t.TempDir(), "podman.log")
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		cmd := exec.CommandContext(ctx, "bash", "../../hack/metrics-smoke.sh")
-		cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "SMOKE_TEST_LOG="+log, "SMOKE_TEST_FAIL_AT="+failAt, "METRICS_BINARY=")
+		cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"), "SMOKE_TEST_LOG="+log, "SMOKE_TEST_FAIL_AT="+failAt, "METRICS_BINARY=", "METRICS_IMAGE_BINARY=")
 		out, err := cmd.CombinedOutput()
 		cancel()
 		if err == nil || ctx.Err() == context.DeadlineExceeded {

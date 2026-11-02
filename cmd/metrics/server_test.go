@@ -8,6 +8,11 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
+	"sync/atomic"
+
+	"github.com/metallb/frr-k8s/cmd/metrics/collector"
+	"github.com/prometheus/client_golang/prometheus"
 	"testing"
 	"time"
 
@@ -152,4 +157,117 @@ func TestShutdownBeforeServingDoesNotLeaveAListener(t *testing.T) {
 		conn.Close()
 		t.Fatal("listener survived shutdown")
 	}
+}
+
+// This exercises actual TCP/TLS backpressure through the production server.
+// Clients complete requests and then never consume their response bodies.
+func TestSlowTLSClientsBoundResponsesAndRecover(t *testing.T) {
+	const writeTimeout = 3 * time.Second
+	var reads atomic.Int32
+	large := prometheus.MustNewConstMetric(
+		prometheus.NewDesc("frrk8s_test_large_response", "Test payload", []string{"payload"}, nil),
+		prometheus.GaugeValue, 1, strings.Repeat("x", 4<<20),
+	)
+	e := newExporter(func(context.Context, string) ([]byte, error) {
+		reads.Add(1)
+		return nil, nil
+	}, 10*time.Second)
+	e.cs = []collector.Collector{{Name: "network", Collect: func(ctx context.Context, run collector.Runner) ([]prometheus.Metric, error) {
+		if _, err := run(ctx, "network"); err != nil {
+			return nil, err
+		}
+		return []prometheus.Metric{large}, nil
+	}}}
+	opt, err := tlsconfig.OptFor("", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := tlsconfig.ForContext(t.Context(), opt, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: e, TLSConfig: cfg, ReadTimeout: time.Second, WriteTimeout: writeTimeout}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- serveListener(ctx, srv, listener, 100*time.Millisecond) }()
+	var clients []*tls.Conn
+	t.Cleanup(func() {
+		for _, conn := range clients {
+			_ = conn.Close()
+		}
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Error(err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("server cleanup hung")
+		}
+	})
+	for range maxResponses {
+		conn, err := tls.Dial("tcp", listener.Addr().String(), &tls.Config{InsecureSkipVerify: true}) // #nosec G402 -- local test
+		if err != nil {
+			t.Fatal(err)
+		}
+		clients = append(clients, conn)
+		if err := conn.NetConn().(*net.TCPConn).SetReadBuffer(1024); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.WriteString(conn, "GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for (len(e.responses) != maxResponses || reads.Load() != int32(maxResponses) || len(e.sem) != 0) && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(e.responses) != maxResponses || reads.Load() != int32(maxResponses) || len(e.sem) != 0 {
+		t.Fatalf("failed to hold eight responses: slots=%d, reads=%d, collecting=%d", len(e.responses), reads.Load(), len(e.sem))
+	}
+	time.Sleep(100 * time.Millisecond)
+	if len(e.responses) != maxResponses {
+		t.Fatalf("clients did not block responses: slots=%d", len(e.responses))
+	}
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, Timeout: time.Second} // #nosec G402 -- local test
+	defer client.CloseIdleConnections()
+	resp, err := client.Get("https://" + listener.Addr().String() + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusServiceUnavailable || reads.Load() != int32(maxResponses) {
+		t.Fatalf("overload: status=%d reads=%d", resp.StatusCode, reads.Load())
+	}
+	cleanupStart := time.Now()
+	// Go TLS may spend another five seconds closing the stalled connection.
+	deadline = time.Now().Add(writeTimeout + 6*time.Second)
+	for len(e.responses) != 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(e.responses) != 0 {
+		t.Fatalf("write deadline retained %d response slots", len(e.responses))
+	}
+	client.Timeout = 5 * time.Second
+	resp, err = client.Get("https://" + listener.Addr().String() + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || n < 4<<20 || reads.Load() != int32(maxResponses+1) {
+		t.Fatalf("recovery: status=%d bytes=%d reads=%d", resp.StatusCode, n, reads.Load())
+	}
+	t.Logf("8 unread TLS responses held; ninth returned 503 without reading; deadline/close-notify cleanup released all slots in %v; recovery served %d bytes", time.Since(cleanupStart), n)
 }

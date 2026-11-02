@@ -21,10 +21,17 @@ cleanup() {
 trap cleanup EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-if [[ -n "${METRICS_BINARY:-}" ]]; then
+binary=${METRICS_IMAGE_BINARY:-/exporter}
+binary_name=${binary##*/}
+binary_mount=()
+if [[ -n "${METRICS_IMAGE_BINARY:-}" ]]; then
+  [[ -z "${METRICS_BINARY:-}" ]] || fail 'select an image binary or a host binary, not both'
+elif [[ -n "${METRICS_BINARY:-}" ]]; then
   cp "$METRICS_BINARY" "$tmp/exporter"
+  binary_mount=(-v "$tmp/exporter:/exporter:ro,z")
 else
   CGO_ENABLED=0 go build -trimpath -o "$tmp/exporter" ./cmd/metrics
+  binary_mount=(-v "$tmp/exporter:/exporter:ro,z")
 fi
 
 # PKI: one CA, a server certificate for 127.0.0.1 and a scraper certificate.
@@ -79,8 +86,8 @@ run_frr() { # name ip extra-args...
     --cap-add NET_ADMIN --cap-add NET_RAW --cap-add SYS_ADMIN -v "$tmp/$name:/etc/frr:Z" "$@" "$image" >/dev/null
 }
 # The PKI and binary are shared read-only by the two exporter processes.
-run_frr r2 10.77.0.3 -p 127.0.0.1:19142:9141 -v "$tmp/pki:/pki:ro,z" -v "$tmp/exporter:/exporter:ro,z"
-run_frr r1 10.77.0.2 -p 127.0.0.1:19141:9141 -v "$tmp/pki:/pki:ro,z" -v "$tmp/exporter:/exporter:ro,z"
+run_frr r2 10.77.0.3 -p 127.0.0.1:19142:9141 -v "$tmp/pki:/pki:ro,z" "${binary_mount[@]}"
+run_frr r1 10.77.0.2 -p 127.0.0.1:19141:9141 -v "$tmp/pki:/pki:ro,z" "${binary_mount[@]}"
 podman image inspect "$image" --format 'FRR image: {{.Id}} {{.Digest}}'
 sleep 5
 
@@ -99,7 +106,7 @@ podman exec "${lab}-r1" sh -c 'ip link add vm0 type dummy && ip link set vm0 mas
   bridge fdb add 02:aa:bb:cc:dd:01 dev vm0 master static'
 
 for r in r1 r2; do
-  podman exec -d --user frr "${lab}-$r" /exporter --disable-metrics-auth --collectors bgp,bfd,evpn --metrics-bind-address 0.0.0.0 --metrics-port 9141 \
+  podman exec -d --workdir / --user frr "${lab}-$r" "$binary" --disable-metrics-auth --collectors bgp,bfd,evpn --metrics-bind-address 0.0.0.0 --metrics-port 9141 \
     --tls-cert-file /pki/server.crt --tls-private-key-file /pki/server.key --tls-client-ca-file /pki/ca.crt
 done
 
@@ -149,6 +156,35 @@ for file in "$tmp/first" "$tmp/second"; do
   done
 done
 echo "ok: $(grep -c '^frrk8s' <<<"$out") frrk8s series from $image; all collectors succeeded; client certificate required"
+
+# A stopped bgpd makes overlapping reads observable: four requests must own
+# four vtysh processes before an excess request is rejected without another read.
+podman exec "${lab}-r1" sh -c 'kill -STOP "$(cat /run/frr/bgpd.pid)"'
+readers=()
+for n in 1 2 3 4; do
+  scrape -H 'X-Prometheus-Scrape-Timeout-Seconds: 5' > "$tmp/concurrent-$n" &
+  readers+=("$!")
+done
+for _ in $(seq 30); do
+  active=$(podman exec "${lab}-r1" sh -c 'pidof vtysh | wc -w')
+  [ "$active" = 4 ] && break
+  sleep 0.05
+done
+[ "$active" = 4 ] || fail "four scrapes did not overlap in vtysh ($active active)"
+code=$(curl -s --max-time 2 -o /dev/null -w '%{http_code}' --cacert pki/ca.crt --cert pki/scraper.crt --key pki/scraper.key https://127.0.0.1:19141/metrics)
+[ "$code" = 503 ] || fail "scrape beyond collection slots returned $code"
+[ "$(podman exec "${lab}-r1" sh -c 'pidof vtysh | wc -w')" = 4 ] || fail 'rejected scrape started another read'
+for reader in "${readers[@]}"; do wait "$reader"; done
+for n in 1 2 3 4; do
+  out=$(cat "$tmp/concurrent-$n")
+  check frrk8s_scrape_collector_success 0 'collector="bgp"'
+  check frrk8s_scrape_collector_success 1 'collector="bfd"'
+  check frrk8s_scrape_collector_success 1 'collector="evpn"'
+done
+podman exec "${lab}-r1" sh -c 'kill -CONT "$(cat /run/frr/bgpd.pid)"'
+out=$(scrape)
+check frrk8s_scrape_collector_success 1 'collector="bgp"'
+echo 'ok: four overlapping real reads; excess scrape returned 503; slots recovered'
 
 # Each PE's access LAG negotiates LACP with a local virtual CE LAG. Both PEs
 # advertise the same ESI, with different DF preferences, over the EVPN session.
@@ -247,12 +283,12 @@ for _ in $(seq 50); do
   sleep 0.1
 done
 podman exec "${lab}-r1" pidof vtysh >/dev/null || fail 'shutdown scrape never reached vtysh'
-podman exec "${lab}-r1" sh -c 'kill -TERM "$(pidof exporter)"'
+podman exec "${lab}-r1" sh -c 'kill -TERM "$(pidof "$1")"' sh "$binary_name"
 for _ in $(seq 80); do
-  if ! podman exec "${lab}-r1" pidof exporter >/dev/null; then break; fi
+  if ! podman exec "${lab}-r1" pidof "$binary_name" >/dev/null; then break; fi
   sleep 0.1
 done
-if podman exec "${lab}-r1" pidof exporter >/dev/null; then fail 'exporter did not exit after SIGTERM'; fi
+if podman exec "${lab}-r1" pidof "$binary_name" >/dev/null; then fail 'exporter did not exit after SIGTERM'; fi
 if podman exec "${lab}-r1" pidof vtysh >/dev/null; then fail 'vtysh survived exporter shutdown'; fi
 wait "$scraper" || true
 podman exec "${lab}-r1" sh -c 'kill -CONT "$(cat /run/frr/bgpd.pid)"'
