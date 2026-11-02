@@ -1,174 +1,154 @@
-// SPDX-License-Identifier:Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 
 package collector
 
 import (
-	"github.com/go-kit/log"
-	"github.com/go-kit/log/level"
-	"github.com/metallb/frr-k8s/internal/frr"
-	"github.com/prometheus/client_golang/prometheus"
+	"context"
+	"encoding/json"
+	"fmt"
 
-	"github.com/metallb/frr-k8s/cmd/metrics/vtysh"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
-var labels = []string{"peer", "vrf"}
+// Series names, types and labels for BGP follow the frr-k8s exporter, so
+// dashboards and rules written for it keep working.
 
 var (
-	sessionUpDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(Namespace, Subsystem, SessionUp.Name),
-		SessionUp.Help,
-		labels,
-		nil,
-	)
+	peerVRF = []string{"peer", "vrf"}
 
-	prefixesDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(Namespace, Subsystem, Prefixes.Name),
-		Prefixes.Help,
-		labels,
-		nil,
-	)
+	bgpSessionUp = desc("bgp_session_up", "BGP session state (1 is up, 0 is down)", peerVRF...)
+	// The two _total series are gauges that sum every address family. Use the
+	// per-family series below to tell families apart.
+	bgpAnnounced = desc("bgp_announced_prefixes_total", "Number of prefixes currently being advertised on the BGP session", peerVRF...)
+	bgpReceived  = desc("bgp_received_prefixes_total", "Number of prefixes currently being received on the BGP session", peerVRF...)
 
-	receivedPrefixesDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(Namespace, Subsystem, ReceivedPrefixes.Name),
-		ReceivedPrefixes.Help,
-		labels,
-		nil,
-	)
+	bgpFamilyAnnounced = desc("bgp_family_announced_prefixes", "Number of prefixes currently being advertised on the BGP session for one address family", "peer", "vrf", "afi", "safi")
+	bgpFamilyReceived  = desc("bgp_family_received_prefixes", "Number of prefixes currently being received on the BGP session for one address family", "peer", "vrf", "afi", "safi")
 
-	opensSentDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(Namespace, Subsystem, "opens_sent"),
-		"Number of BGP open messages sent",
-		labels,
-		nil,
-	)
-
-	opensReceivedDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(Namespace, Subsystem, "opens_received"),
-		"Number of BGP open messages received",
-		labels,
-		nil,
-	)
-
-	notificationsSentDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(Namespace, Subsystem, "notifications_sent"),
-		"Number of BGP notification messages sent",
-		labels,
-		nil,
-	)
-
-	updatesSentDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(Namespace, Subsystem, UpdatesSent.Name),
-		UpdatesSent.Help,
-		labels,
-		nil,
-	)
-
-	updatesReceivedDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(Namespace, Subsystem, "updates_total_received"),
-		"Number of BGP UPDATE messages received",
-		labels,
-		nil,
-	)
-
-	keepalivesSentDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(Namespace, Subsystem, "keepalives_sent"),
-		"Number of BGP keepalive messages sent",
-		labels,
-		nil,
-	)
-
-	keepalivesReceivedDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(Namespace, Subsystem, "keepalives_received"),
-		"Number of BGP keepalive messages received",
-		labels,
-		nil,
-	)
-
-	routeRefreshSentedDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(Namespace, Subsystem, "route_refresh_sent"),
-		"Number of BGP route refresh messages sent",
-		labels,
-		nil,
-	)
-
-	totalSentDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(Namespace, Subsystem, "total_sent"),
-		"Number of total BGP messages sent",
-		labels,
-		nil,
-	)
-
-	totalReceivedDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(Namespace, Subsystem, "total_received"),
-		"Number of total BGP messages received",
-		labels,
-		nil,
-	)
+	// Message counters belong to the TCP session, so they stay per peer.
+	bgpMessages = []struct {
+		desc *prometheus.Desc
+		key  string
+	}{
+		{desc("bgp_opens_sent", "Number of BGP open messages sent", peerVRF...), "opensSent"},
+		{desc("bgp_opens_received", "Number of BGP open messages received", peerVRF...), "opensRecv"},
+		{desc("bgp_notifications_sent", "Number of BGP notification messages sent", peerVRF...), "notificationsSent"},
+		{desc("bgp_updates_total", "Number of BGP UPDATE messages sent", peerVRF...), "updatesSent"},
+		{desc("bgp_updates_total_received", "Number of BGP UPDATE messages received", peerVRF...), "updatesRecv"},
+		{desc("bgp_keepalives_sent", "Number of BGP keepalive messages sent", peerVRF...), "keepalivesSent"},
+		{desc("bgp_keepalives_received", "Number of BGP keepalive messages received", peerVRF...), "keepalivesRecv"},
+		{desc("bgp_route_refresh_sent", "Number of BGP route refresh messages sent", peerVRF...), "routeRefreshSent"},
+		{desc("bgp_total_sent", "Number of total BGP messages sent", peerVRF...), "totalSent"},
+		{desc("bgp_total_received", "Number of total BGP messages received", peerVRF...), "totalRecv"},
+	}
 )
 
-type bgp struct {
-	Log    log.Logger
-	frrCli vtysh.Cli
+// bgpFamilies maps the family keys FRR 10.4.3 uses to afi and safi labels.
+// Other keys count only in the _total gauges.
+var bgpFamilies = map[string][2]string{
+	"ipv4Unicast": {"ipv4", "unicast"},
+	"ipv6Unicast": {"ipv6", "unicast"},
+	"ipv4Vpn":     {"ipv4", "vpn"},
+	"l2VpnEvpn":   {"l2vpn", "evpn"},
 }
 
-func NewBGP(l log.Logger) prometheus.Collector {
-	log := log.With(l, "collector", Subsystem)
-	return &bgp{Log: log, frrCli: vtysh.Run}
+type bgpNeighbor struct {
+	State    string             `json:"bgpState"`
+	Stats    map[string]*uint64 `json:"messageStats"`
+	Families map[string]struct {
+		// Pointers: FRR omits sentPrefixCounter for a family with no update
+		// subgroup, and a missing count must not read as zero.
+		Sent     *uint64 `json:"sentPrefixCounter"`
+		Accepted *uint64 `json:"acceptedPrefixCounter"`
+	} `json:"addressFamilyInfo"`
 }
 
-func mocknewBGP(l log.Logger) *bgp {
-	log := log.With(l, "collector", Subsystem)
-	return &bgp{Log: log, frrCli: vtysh.Run}
-}
-
-func (c *bgp) Describe(ch chan<- *prometheus.Desc) {
-	ch <- sessionUpDesc
-	ch <- prefixesDesc
-	ch <- receivedPrefixesDesc
-	ch <- opensSentDesc
-	ch <- opensReceivedDesc
-	ch <- notificationsSentDesc
-	ch <- updatesSentDesc
-	ch <- updatesReceivedDesc
-	ch <- keepalivesSentDesc
-	ch <- keepalivesReceivedDesc
-	ch <- routeRefreshSentedDesc
-	ch <- totalSentDesc
-	ch <- totalReceivedDesc
-}
-
-func (c *bgp) Collect(ch chan<- prometheus.Metric) {
-	neighbors, err := vtysh.GetBGPNeighbors(c.frrCli)
-	if err != nil {
-		level.Error(c.Log).Log("error", err, "msg", "failed to fetch BGP neighbors from FRR")
-		return
+// collectBGP reads every neighbor in every VRF with one command. FRR keys the
+// reply by VRF and puts the peers beside two bookkeeping entries.
+func collectBGP(ctx context.Context, run Runner) ([]prometheus.Metric, error) {
+	out, err := run(ctx, "show bgp vrf all neighbors json")
+	if err == nil {
+		err = ctx.Err()
 	}
-
-	updateNeighborsMetrics(ch, neighbors)
-}
-
-func updateNeighborsMetrics(ch chan<- prometheus.Metric, neighbors map[string][]*frr.Neighbor) {
-	for vrf, nn := range neighbors {
-		for _, n := range nn {
-			sessionUp := 1
-			if !n.Connected {
-				sessionUp = 0
+	if err != nil {
+		return nil, err
+	}
+	var vrfs map[string]map[string]json.RawMessage
+	if err := json.Unmarshal(out, &vrfs); err != nil {
+		return nil, fmt.Errorf("parsing BGP neighbors: %w", err)
+	}
+	if vrfs == nil {
+		return nil, fmt.Errorf("BGP neighbors must be an object, not null")
+	}
+	var ms []prometheus.Metric
+	for vrf, entries := range vrfs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if vrf == "" || entries == nil {
+			return nil, fmt.Errorf("invalid BGP VRF %q", vrf)
+		}
+		for peer, raw := range entries {
+			if err := ctx.Err(); err != nil {
+				return nil, err
 			}
-			peerLabel := n.MetricName()
-
-			ch <- prometheus.MustNewConstMetric(sessionUpDesc, prometheus.GaugeValue, float64(sessionUp), peerLabel, vrf)
-			ch <- prometheus.MustNewConstMetric(prefixesDesc, prometheus.GaugeValue, float64(n.PrefixSent), peerLabel, vrf)
-			ch <- prometheus.MustNewConstMetric(receivedPrefixesDesc, prometheus.GaugeValue, float64(n.PrefixReceived), peerLabel, vrf)
-			ch <- prometheus.MustNewConstMetric(opensSentDesc, prometheus.CounterValue, float64(n.MsgStats.OpensSent), peerLabel, vrf)
-			ch <- prometheus.MustNewConstMetric(opensReceivedDesc, prometheus.CounterValue, float64(n.MsgStats.OpensReceived), peerLabel, vrf)
-			ch <- prometheus.MustNewConstMetric(notificationsSentDesc, prometheus.CounterValue, float64(n.MsgStats.NotificationsSent), peerLabel, vrf)
-			ch <- prometheus.MustNewConstMetric(updatesSentDesc, prometheus.CounterValue, float64(n.MsgStats.UpdatesSent), peerLabel, vrf)
-			ch <- prometheus.MustNewConstMetric(updatesReceivedDesc, prometheus.CounterValue, float64(n.MsgStats.UpdatesReceived), peerLabel, vrf)
-			ch <- prometheus.MustNewConstMetric(keepalivesSentDesc, prometheus.CounterValue, float64(n.MsgStats.KeepalivesSent), peerLabel, vrf)
-			ch <- prometheus.MustNewConstMetric(keepalivesReceivedDesc, prometheus.CounterValue, float64(n.MsgStats.KeepalivesReceived), peerLabel, vrf)
-			ch <- prometheus.MustNewConstMetric(routeRefreshSentedDesc, prometheus.CounterValue, float64(n.MsgStats.RouteRefreshSent), peerLabel, vrf)
-			ch <- prometheus.MustNewConstMetric(totalSentDesc, prometheus.CounterValue, float64(n.MsgStats.TotalSent), peerLabel, vrf)
-			ch <- prometheus.MustNewConstMetric(totalReceivedDesc, prometheus.CounterValue, float64(n.MsgStats.TotalReceived), peerLabel, vrf)
+			// These bookkeeping names can also be unnumbered peer interfaces.
+			// FRR uses scalar metadata and object-valued neighbors in one map.
+			if peer == "vrfId" {
+				var id *int64 // FRR uses -1 for a configured VRF missing from the kernel.
+				if json.Unmarshal(raw, &id) == nil && id != nil {
+					continue
+				}
+			}
+			if peer == "vrfName" {
+				var name *string
+				if json.Unmarshal(raw, &name) == nil && name != nil {
+					continue
+				}
+			}
+			var n bgpNeighbor
+			if err := json.Unmarshal(raw, &n); err != nil {
+				return nil, fmt.Errorf("parsing BGP neighbor %s in VRF %s: %w", peer, vrf, err)
+			}
+			if peer == "" || n.State == "" {
+				return nil, fmt.Errorf("BGP neighbor %q in VRF %s has no identity or state", peer, vrf)
+			}
+			ms = append(ms, n.metrics(peer, vrf)...)
 		}
 	}
+	return ms, nil
+}
+
+func (n bgpNeighbor) metrics(peer, vrf string) []prometheus.Metric {
+	up := 0.0
+	if n.State == "Established" {
+		up = 1
+	}
+	var announced, received float64
+	ms := []prometheus.Metric{prometheus.MustNewConstMetric(bgpSessionUp, prometheus.GaugeValue, up, peer, vrf)}
+	for key, f := range n.Families {
+		if f.Sent != nil {
+			announced += float64(*f.Sent)
+		}
+		if f.Accepted != nil {
+			received += float64(*f.Accepted)
+		}
+		if fam, known := bgpFamilies[key]; known {
+			if f.Sent != nil {
+				ms = append(ms, prometheus.MustNewConstMetric(bgpFamilyAnnounced, prometheus.GaugeValue, float64(*f.Sent), peer, vrf, fam[0], fam[1]))
+			}
+			if f.Accepted != nil {
+				ms = append(ms, prometheus.MustNewConstMetric(bgpFamilyReceived, prometheus.GaugeValue, float64(*f.Accepted), peer, vrf, fam[0], fam[1]))
+			}
+		}
+	}
+	ms = append(ms,
+		prometheus.MustNewConstMetric(bgpAnnounced, prometheus.GaugeValue, announced, peer, vrf),
+		prometheus.MustNewConstMetric(bgpReceived, prometheus.GaugeValue, received, peer, vrf))
+	for _, m := range bgpMessages {
+		if v := n.Stats[m.key]; v != nil {
+			ms = append(ms, prometheus.MustNewConstMetric(m.desc, prometheus.CounterValue, float64(*v), peer, vrf))
+		}
+	}
+	return ms
 }

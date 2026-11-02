@@ -1,142 +1,158 @@
-// SPDX-License-Identifier:Apache-2.0
+// SPDX-License-Identifier: Apache-2.0
 
 package collector
 
 import (
-	"github.com/go-kit/log"
-	"github.com/go-kit/log/level"
-	"github.com/metallb/frr-k8s/cmd/metrics/vtysh"
-	"github.com/metallb/frr-k8s/internal/frr"
+	"context"
+	"encoding/json"
+	"fmt"
+	"strconv"
+
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-const subsystem = "bfd"
-
+// BFD keeps peer/VRF output labels while correlating full internal identities.
 var (
-	bfdSessionUpDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(Namespace, subsystem, SessionUp.Name),
-		"BFD session state (1 is up, 0 is down)",
-		labels,
-		nil,
-	)
+	bfdLabels = []string{"peer", "vrf"}
 
-	controlPacketInputDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(Namespace, subsystem, "control_packet_input"),
-		"Number of received BFD control packets",
-		labels,
-		nil,
-	)
-
-	controlPacketOutputDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(Namespace, subsystem, "control_packet_output"),
-		"Number of sent BFD control packets",
-		labels,
-		nil,
-	)
-
-	echoPacketInputDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(Namespace, subsystem, "echo_packet_input"),
-		"Number of received BFD echo packets",
-		labels,
-		nil,
-	)
-
-	echoPacketOutputDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(Namespace, subsystem, "echo_packet_output"),
-		"Number of sent BFD echo packets",
-		labels,
-		nil,
-	)
-
-	sessionUpEventsDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(Namespace, subsystem, "session_up_events"),
-		"Number of BFD session up events",
-		labels,
-		nil,
-	)
-
-	sessionDownEventsDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(Namespace, subsystem, "session_down_events"),
-		"Number of BFD session down events",
-		labels,
-		nil,
-	)
-
-	zebraNotificationsDesc = prometheus.NewDesc(
-		prometheus.BuildFQName(Namespace, subsystem, "zebra_notifications"),
-		"Number of BFD zebra notifications",
-		labels,
-		nil,
-	)
+	bfdSessionUp = desc("bfd_session_up", "BFD session state (1 is up, 0 is down)", bfdLabels...)
+	bfdCounters  = []struct {
+		desc *prometheus.Desc
+		get  func(*bfdCounterRow) *uint64
+	}{
+		{desc("bfd_control_packet_input", "Number of received BFD control packets", bfdLabels...), func(r *bfdCounterRow) *uint64 { return r.ControlIn }},
+		{desc("bfd_control_packet_output", "Number of sent BFD control packets", bfdLabels...), func(r *bfdCounterRow) *uint64 { return r.ControlOut }},
+		{desc("bfd_echo_packet_input", "Number of received BFD echo packets", bfdLabels...), func(r *bfdCounterRow) *uint64 { return r.EchoIn }},
+		{desc("bfd_echo_packet_output", "Number of sent BFD echo packets", bfdLabels...), func(r *bfdCounterRow) *uint64 { return r.EchoOut }},
+		{desc("bfd_session_up_events", "Number of BFD session up events", bfdLabels...), func(r *bfdCounterRow) *uint64 { return r.UpEvents }},
+		{desc("bfd_session_down_events", "Number of BFD session down events", bfdLabels...), func(r *bfdCounterRow) *uint64 { return r.DownEvents }},
+		{desc("bfd_zebra_notifications", "Number of BFD zebra notifications", bfdLabels...), func(r *bfdCounterRow) *uint64 { return r.ZebraNotifications }},
+	}
 )
 
-type bfd struct {
-	Log    log.Logger
-	frrCli vtysh.Cli
+// bfdKey is FRR's session identity as both replies carry it. The interface is
+// absent on a multihop session.
+type bfdKey struct {
+	Peer      string `json:"peer"`
+	VRF       string `json:"vrf"`
+	Local     string `json:"local"`
+	Interface string `json:"interface"`
+	Multihop  *bool  `json:"multihop"`
+	ID        uint32 `json:"id"` // correlation only, never a time-series label
 }
 
-func NewBFD(l log.Logger) prometheus.Collector {
-	log := log.With(l, "collector", subsystem)
-	return &bfd{Log: log, frrCli: vtysh.Run}
+func (k bfdKey) valid() bool {
+	// FRR may omit local, interface and VRF; never invent those values.
+	return k.ID != 0 && k.Peer != "" && k.Multihop != nil
 }
 
-func mockNewBFD(l log.Logger) *bfd {
-	log := log.With(l, "collector", subsystem)
-	return &bfd{Log: log, frrCli: vtysh.Run}
+func (k bfdKey) labels() [5]string {
+	return [5]string{k.Peer, k.VRF, k.Local, k.Interface, strconv.FormatBool(*k.Multihop)}
 }
 
-func (c *bfd) Describe(ch chan<- *prometheus.Desc) {
-	ch <- bfdSessionUpDesc
-	ch <- controlPacketInputDesc
-	ch <- controlPacketOutputDesc
-	ch <- echoPacketInputDesc
-	ch <- echoPacketOutputDesc
-	ch <- sessionUpEventsDesc
-	ch <- sessionDownEventsDesc
-	ch <- zebraNotificationsDesc
+type bfdSessionRow struct {
+	bfdKey
+	Status string          `json:"status"`
+	Name   json.RawMessage `json:"bfd-name"` // present for unsupported named/SBFD modes
 }
 
-func (c *bfd) Collect(ch chan<- prometheus.Metric) {
-	peers, err := vtysh.GetBFDPeers(c.frrCli)
-	if err != nil {
-		level.Error(c.Log).Log("error", err, "msg", "failed to fetch BFD peers from FRR")
-		return
+// The counters are pointers: a field FRR does not report is omitted, not 0.
+type bfdCounterRow struct {
+	bfdKey
+	ControlIn          *uint64 `json:"control-packet-input"`
+	ControlOut         *uint64 `json:"control-packet-output"`
+	EchoIn             *uint64 `json:"echo-packet-input"`
+	EchoOut            *uint64 `json:"echo-packet-output"`
+	UpEvents           *uint64 `json:"session-up"`
+	DownEvents         *uint64 `json:"session-down"`
+	ZebraNotifications *uint64 `json:"zebra-notifications"`
+}
+
+// collectBFD reads every session in every VRF with two commands and joins them
+// on session ID, cross-checking the full label identity. A session present in
+// only one reply changed between reads; discard the whole result so success
+// never describes an incomplete snapshot. Duplicate IDs or label identities
+// also fail rather than silently mixing sessions.
+func collectBFD(ctx context.Context, run Runner) ([]prometheus.Metric, error) {
+	var sessions []bfdSessionRow
+	var counters []bfdCounterRow
+	for _, read := range []struct {
+		command string
+		into    any
+	}{{"show bfd peers json", &sessions}, {"show bfd peers counters json", &counters}} {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		out, err := run(ctx, read.command)
+		if err == nil {
+			err = ctx.Err()
+		}
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(out, read.into); err != nil {
+			return nil, fmt.Errorf("parsing %q: %w", read.command, err)
+		}
 	}
-
-	updatePeersMetrics(ch, peers)
-
-	peersCounters, err := vtysh.GetBFDPeersCounters(c.frrCli)
-	if err != nil {
-		level.Error(c.Log).Log("error", err, "msg", "failed to fetch BFD peers counters from FRR")
-		return
+	if sessions == nil || counters == nil {
+		return nil, fmt.Errorf("BFD peers and counters must be arrays, not null")
 	}
-
-	updatePeersCountersMetrics(ch, peersCounters)
-}
-
-func updatePeersMetrics(ch chan<- prometheus.Metric, peersPerVRF map[string][]frr.BFDPeer) {
-	for vrf, peers := range peersPerVRF {
-		for _, p := range peers {
-			sessionUp := 1
-			if p.Status != "up" {
-				sessionUp = 0
+	byID := make(map[uint32]*bfdCounterRow, len(counters))
+	keys := make(map[[5]string]bool, len(counters))
+	for i := range counters {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		c := &counters[i]
+		if !c.valid() {
+			return nil, fmt.Errorf("BFD counter row has no ID, peer or multihop flag: %+v", c.bfdKey)
+		}
+		if byID[c.ID] != nil || keys[c.labels()] {
+			return nil, fmt.Errorf("duplicate BFD counter ID or identity: %+v", c.bfdKey)
+		}
+		byID[c.ID], keys[c.labels()] = c, true
+	}
+	seen := make(map[[5]string]bool, len(sessions))
+	legacy := make(map[[2]string]bool, len(sessions))
+	var ms []prometheus.Metric
+	for _, s := range sessions {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if len(s.Name) != 0 {
+			return nil, fmt.Errorf("BFD session %d uses unsupported named/SBFD mode", s.ID)
+		}
+		if !s.valid() || s.Status == "" {
+			return nil, fmt.Errorf("BFD session has no ID, peer, multihop flag or status: %+v", s.bfdKey)
+		}
+		l := s.labels()
+		key := [2]string{l[0], l[1]}
+		if legacy[key] {
+			return nil, fmt.Errorf("BFD sessions share peer/VRF output labels: %v", key)
+		}
+		legacy[key] = true
+		if seen[l] {
+			return nil, fmt.Errorf("two BFD sessions share the identity %+v", s.bfdKey)
+		}
+		seen[l] = true
+		c := byID[s.ID]
+		if c == nil || c.labels() != l {
+			return nil, fmt.Errorf("BFD session %d has no matching counters and identity", s.ID)
+		}
+		delete(byID, s.ID)
+		up := 0.0
+		if s.Status == "up" {
+			up = 1
+		}
+		ms = append(ms, prometheus.MustNewConstMetric(bfdSessionUp, prometheus.GaugeValue, up, l[:2]...))
+		for _, m := range bfdCounters {
+			if v := m.get(c); v != nil {
+				ms = append(ms, prometheus.MustNewConstMetric(m.desc, prometheus.CounterValue, float64(*v), l[:2]...))
 			}
-
-			ch <- prometheus.MustNewConstMetric(bfdSessionUpDesc, prometheus.GaugeValue, float64(sessionUp), p.Peer, vrf)
 		}
 	}
-}
-
-func updatePeersCountersMetrics(ch chan<- prometheus.Metric, peersCountersPerVRF map[string][]frr.BFDPeerCounters) {
-	for vrf, peersCounters := range peersCountersPerVRF {
-		for _, p := range peersCounters {
-			ch <- prometheus.MustNewConstMetric(controlPacketInputDesc, prometheus.CounterValue, float64(p.ControlPacketInput), p.Peer, vrf)
-			ch <- prometheus.MustNewConstMetric(controlPacketOutputDesc, prometheus.CounterValue, float64(p.ControlPacketOutput), p.Peer, vrf)
-			ch <- prometheus.MustNewConstMetric(echoPacketInputDesc, prometheus.CounterValue, float64(p.EchoPacketInput), p.Peer, vrf)
-			ch <- prometheus.MustNewConstMetric(echoPacketOutputDesc, prometheus.CounterValue, float64(p.EchoPacketOutput), p.Peer, vrf)
-			ch <- prometheus.MustNewConstMetric(sessionUpEventsDesc, prometheus.CounterValue, float64(p.SessionUpEvents), p.Peer, vrf)
-			ch <- prometheus.MustNewConstMetric(sessionDownEventsDesc, prometheus.CounterValue, float64(p.SessionDownEvents), p.Peer, vrf)
-			ch <- prometheus.MustNewConstMetric(zebraNotificationsDesc, prometheus.CounterValue, float64(p.ZebraNotifications), p.Peer, vrf)
-		}
+	if len(byID) != 0 {
+		return nil, fmt.Errorf("BFD counters contain %d sessions absent from the peers read", len(byID))
 	}
+	return ms, nil
 }
