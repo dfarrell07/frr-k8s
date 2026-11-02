@@ -7,26 +7,13 @@ import (
 	"crypto/tls"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
 
 	certutil "k8s.io/client-go/util/cert"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 )
 
-// For builds a *tls.Config by applying the given TLS option function.
-// If certFile and keyFile are provided, a background certwatcher goroutine
-// is started to hot-reload them on change. Otherwise, a self-signed
-// certificate is generated in memory once.
-func For(tlsOpt func(*tls.Config), certFile, keyFile string) (*tls.Config, error) {
-	ctx := context.Background()
-	if certFile != "" && keyFile != "" {
-		ctx, _ = signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)
-	}
-	return ForContext(ctx, tlsOpt, certFile, keyFile)
-}
-
-// ForContext is For with a caller-owned lifetime for certificate watching.
+// ForContext applies TLS options and watches an explicit key pair until ctx
+// ends. Without a key pair, it generates a self-signed certificate once.
 func ForContext(ctx context.Context, tlsOpt func(*tls.Config), certFile, keyFile string) (*tls.Config, error) {
 	cfg := &tls.Config{}
 	tlsOpt(cfg)

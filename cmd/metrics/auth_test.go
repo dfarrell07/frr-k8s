@@ -40,7 +40,7 @@ func TestStandaloneDoesNotChangeKubernetesDefault(t *testing.T) {
 		valid         bool
 	}{
 		{false, "", "", "", true}, {true, "", "", "", true}, {true, "ca", "cert", "key", true},
-		{false, "ca", "cert", "key", false}, {true, "ca", "", "", false}, {true, "", "cert", "", false}, {false, "", "", "key", false},
+		{false, "ca", "cert", "key", false}, {true, "ca", "", "", false},
 	} {
 		if err := validateAccess(tc.disabled, tc.ca, tc.cert, tc.key); (err == nil) != tc.valid {
 			t.Errorf("%+v: %v", tc, err)

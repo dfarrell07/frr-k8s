@@ -125,7 +125,10 @@ func TestBGPFamilies(t *testing.T) {
 	        "ipv4Flowspec": {"acceptedPrefixCounter": 4, "sentPrefixCounter": 1}}},
 	    "192.0.2.2": {"bgpState": "Established",
 	      "addressFamilyInfo": {"l2VpnEvpn": {"acceptedPrefixCounter": 7, "sentPrefixCounter": 5}}},
-	    "192.0.2.3": {"bgpState": "Active"}}}`
+	    "192.0.2.3": {"bgpState": "Active"},
+    "192.0.2.4": {"bgpState": "Established", "addressFamilyInfo": {
+      "ipv6Unicast": {"sentPrefixCounter": 11, "acceptedPrefixCounter": 13},
+      "ipv4Vpn": {"sentPrefixCounter": 17, "acceptedPrefixCounter": 19}}}}}`
 	ms, err := collectBGP(context.Background(), fake(map[string]string{bgpCmd: reply}))
 	if err != nil {
 		t.Fatal(err)
@@ -138,9 +141,15 @@ func TestBGPFamilies(t *testing.T) {
 		`frrk8s_bgp_received_prefixes_total{peer="192.0.2.1",vrf="default"}`:  6,
 		`frrk8s_bgp_announced_prefixes_total{peer="192.0.2.1",vrf="default"}`: 1,
 		// An EVPN-only peer: the totals equal its EVPN counts.
-		`frrk8s_bgp_received_prefixes_total{peer="192.0.2.2",vrf="default"}`:  7,
-		`frrk8s_bgp_announced_prefixes_total{peer="192.0.2.2",vrf="default"}`: 5,
-		`frrk8s_bgp_session_up{peer="192.0.2.3",vrf="default"}`:               0,
+		`frrk8s_bgp_received_prefixes_total{peer="192.0.2.2",vrf="default"}`:                             7,
+		`frrk8s_bgp_announced_prefixes_total{peer="192.0.2.2",vrf="default"}`:                            5,
+		`frrk8s_bgp_session_up{peer="192.0.2.3",vrf="default"}`:                                          0,
+		`frrk8s_bgp_family_announced_prefixes{afi="ipv6",peer="192.0.2.4",safi="unicast",vrf="default"}`: 11,
+		`frrk8s_bgp_family_received_prefixes{afi="ipv6",peer="192.0.2.4",safi="unicast",vrf="default"}`:  13,
+		`frrk8s_bgp_family_announced_prefixes{afi="ipv4",peer="192.0.2.4",safi="vpn",vrf="default"}`:     17,
+		`frrk8s_bgp_family_received_prefixes{afi="ipv4",peer="192.0.2.4",safi="vpn",vrf="default"}`:      19,
+		`frrk8s_bgp_announced_prefixes_total{peer="192.0.2.4",vrf="default"}`:                            28,
+		`frrk8s_bgp_received_prefixes_total{peer="192.0.2.4",vrf="default"}`:                             32,
 	})
 	absent(t, got,
 		`frrk8s_bgp_family_announced_prefixes{afi="ipv4",peer="192.0.2.1"`,

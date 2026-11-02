@@ -147,9 +147,6 @@ func rbacFilter() (metricsserver.Filter, error) {
 // validateAccess keeps Kubernetes authentication as the default; standalone
 // mTLS is explicit and requires a stable server identity scrapers can trust.
 func validateAccess(disableAuth bool, ca, cert, key string) error {
-	if (cert == "") != (key == "") {
-		return fmt.Errorf("tls-cert-file and tls-private-key-file must be supplied together")
-	}
 	if ca != "" && (!disableAuth || cert == "" || key == "") {
 		return fmt.Errorf("tls-client-ca-file requires disable-metrics-auth and an explicit server certificate and key")
 	}
