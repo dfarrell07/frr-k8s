@@ -44,6 +44,9 @@ type evpnVNI struct {
 // counts are not L2 occupancy.
 func collectEVPN(ctx context.Context, run Runner) ([]prometheus.Metric, error) {
 	out, err := run(ctx, "show evpn vni json")
+	if err == nil {
+		err = ctx.Err()
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -56,6 +59,9 @@ func collectEVPN(ctx context.Context, run Runner) ([]prometheus.Metric, error) {
 	}
 	var ms []prometheus.Metric
 	for vni, v := range vnis {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if v.VNI == 0 || v.VNI > 16777215 || strconv.FormatUint(uint64(v.VNI), 10) != vni ||
 			(v.Type != "L2" && v.Type != "L3") || v.TenantVRF == "" || v.VxlanIf == "" {
 			return nil, fmt.Errorf("invalid EVPN VNI %q: identity, type, VRF and interface are required", vni)
@@ -84,6 +90,9 @@ func collectEVPN(ctx context.Context, run Runner) ([]prometheus.Metric, error) {
 		}
 		seen := make(map[netip.Addr]bool, len(v.VTEPs))
 		for _, ip := range v.VTEPs {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			addr, err := netip.ParseAddr(ip)
 			if err != nil || addr.Zone() != "" || seen[addr] {
 				return nil, fmt.Errorf("invalid or duplicate remote VTEP %q for VNI %s", ip, vni)
@@ -110,7 +119,13 @@ type evpnES struct {
 // flags. The flags array is a bitset, so absent operUp means down only when the
 // array is present and explicitly identifies a local segment.
 func collectEVPNES(ctx context.Context, run Runner) ([]prometheus.Metric, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	out, err := run(ctx, "show evpn es detail json")
+	if err == nil {
+		err = ctx.Err()
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -124,6 +139,9 @@ func collectEVPNES(ctx context.Context, run Runner) ([]prometheus.Metric, error)
 	seen := make(map[string]bool, len(segments))
 	var ms []prometheus.Metric
 	for _, s := range segments {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		// FRR prints a 10-octet ESI; normalize case before detecting duplicates.
 		raw, err := hex.DecodeString(strings.ReplaceAll(s.ESI, ":", ""))
 		esi := strings.ToLower(s.ESI)

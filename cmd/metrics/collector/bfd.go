@@ -83,7 +83,13 @@ func collectBFD(ctx context.Context, run Runner) ([]prometheus.Metric, error) {
 		command string
 		into    any
 	}{{"show bfd peers json", &sessions}, {"show bfd peers counters json", &counters}} {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		out, err := run(ctx, read.command)
+		if err == nil {
+			err = ctx.Err()
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -97,6 +103,9 @@ func collectBFD(ctx context.Context, run Runner) ([]prometheus.Metric, error) {
 	byID := make(map[uint32]*bfdCounterRow, len(counters))
 	keys := make(map[[5]string]bool, len(counters))
 	for i := range counters {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		c := &counters[i]
 		if !c.valid() {
 			return nil, fmt.Errorf("BFD counter row has no ID, peer or multihop flag: %+v", c.bfdKey)
@@ -109,6 +118,9 @@ func collectBFD(ctx context.Context, run Runner) ([]prometheus.Metric, error) {
 	seen := make(map[[5]string]bool, len(sessions))
 	var ms []prometheus.Metric
 	for _, s := range sessions {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if !s.valid() || s.Status == "" {
 			return nil, fmt.Errorf("BFD session has no ID, peer, multihop flag or status: %+v", s.bfdKey)
 		}

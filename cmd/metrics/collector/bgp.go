@@ -67,6 +67,9 @@ type bgpNeighbor struct {
 // reply by VRF and puts the peers beside two bookkeeping entries.
 func collectBGP(ctx context.Context, run Runner) ([]prometheus.Metric, error) {
 	out, err := run(ctx, "show bgp vrf all neighbors json")
+	if err == nil {
+		err = ctx.Err()
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -79,10 +82,16 @@ func collectBGP(ctx context.Context, run Runner) ([]prometheus.Metric, error) {
 	}
 	var ms []prometheus.Metric
 	for vrf, entries := range vrfs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if vrf == "" || entries == nil {
 			return nil, fmt.Errorf("invalid BGP VRF %q", vrf)
 		}
 		for peer, raw := range entries {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			// These bookkeeping names can also be unnumbered peer interfaces.
 			// FRR uses scalar metadata and object-valued neighbors in one map.
 			if peer == "vrfId" {

@@ -5,6 +5,7 @@ package collector
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -510,4 +511,33 @@ func TestCanceledCollectorCannotPublishASuccessfulSnapshot(t *testing.T) {
 	got := series(t, Gather(ctx, nil, []Collector{c}, discard))
 	expect(t, got, map[string]float64{`frrk8s_scrape_collector_success{collector="canceled"}`: 0})
 	absent(t, got, "frrk8s_bgp_")
+}
+
+func TestCancellationStopsAtEachSuccessfulRead(t *testing.T) {
+	replies := map[string]string{bgpCmd: "@bgp_neighbors.json", peersCmd: "@bfd_peers.json", countersCmd: "@bfd_counters.json", vniCmd: "@evpn_vni.json", esCmd: "@evpn_es_df.json"}
+	for _, c := range all {
+		reads := 2
+		if c.Name == "bgp" {
+			reads = 1
+		}
+		for at := 1; at <= reads; at++ {
+			t.Run(fmt.Sprintf("%s/read%d", c.Name, at), func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				calls := 0
+				run := func(ctx context.Context, command string) ([]byte, error) {
+					calls++
+					out, err := fake(replies)(ctx, command)
+					if calls == at {
+						cancel()
+					}
+					return out, err
+				}
+				ms, err := c.Collect(ctx, run)
+				if !errors.Is(err, context.Canceled) || len(ms) != 0 || calls != at {
+					t.Fatalf("canceled after read %d: %d reads, %d metrics, error %v", at, calls, len(ms), err)
+				}
+			})
+		}
+	}
 }
