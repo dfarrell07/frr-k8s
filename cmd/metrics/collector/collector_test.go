@@ -541,3 +541,41 @@ func TestCancellationStopsAtEachSuccessfulRead(t *testing.T) {
 		}
 	}
 }
+
+func TestBFDSBFDDoesNotSatisfyOrdinarySessionHealth(t *testing.T) {
+	// This real SBFD-init session is up, but its name/mode cannot be represented
+	// by the ordinary BFD label identity. Reject even without a simultaneous collision.
+	for _, mixed := range []bool{false, true} {
+		replies := map[string]string{peersCmd: "@bfd_sbfd_peers.json", countersCmd: "@bfd_sbfd_counters.json"}
+		if mixed {
+			for command, ordinary := range map[string]string{peersCmd: "@bfd_peers.json", countersCmd: "@bfd_counters.json"} {
+				named, err := fake(replies)(context.Background(), command)
+				if err != nil {
+					t.Fatal(err)
+				}
+				normal, err := fake(map[string]string{command: ordinary})(context.Background(), command)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var a, b []json.RawMessage
+				if err := json.Unmarshal(named, &a); err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal(normal, &b); err != nil {
+					t.Fatal(err)
+				}
+				both, err := json.Marshal(append(b, a...))
+				if err != nil {
+					t.Fatal(err)
+				}
+				replies[command] = string(both)
+			}
+		}
+		if ms, err := collectBFD(context.Background(), fake(replies)); err == nil || len(ms) != 0 {
+			t.Errorf("mixed=%v: accepted unsupported mode: %d metrics, error %v", mixed, len(ms), err)
+		}
+		got := series(t, Gather(context.Background(), fake(replies), all[1:2], discard))
+		expect(t, got, map[string]float64{`frrk8s_scrape_collector_success{collector="bfd"}`: 0})
+		absent(t, got, "frrk8s_bfd_")
+	}
+}

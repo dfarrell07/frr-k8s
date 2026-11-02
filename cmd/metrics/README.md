@@ -25,7 +25,9 @@ labels: migrate joins and expected-session inventory to all five labels.
 A numbered BGP peer matches BFD's peer address; an unnumbered BGP peer uses its
 interface name instead. BFD-only VRFs are included. IDs correlate the two bulk
 reads and are never time-series labels. Missing/recreated sessions or duplicate
-identities fail the entire BFD collector for that scrape.
+identities fail the entire BFD collector for that scrape. Named/SBFD sessions
+(`bfd-name` present) also fail the collector: their mode is not represented by
+the ordinary BFD labels.
 
 Each collector builds a complete snapshot before publishing. Invalid JSON,
 missing identity/state and invalid counts fail that collector atomically;
@@ -59,7 +61,7 @@ Run `go test -race ./cmd/metrics/... ./internal/tlsconfig/...`. Parser tests use
 [real captures](collector/testdata/README.md), including malformed variants,
 BFD snapshot races and ES transitions. Scale benchmarks cover 2,000 BGP
 neighbors and up to 16,384 VNI/VTEP memberships. The CLI output limit bounds
-input, not an appliance capacity claim. Named/SBFD identity needs qualification.
+input, not an appliance capacity claim.
 BFD RTT is omitted: the available echo-window fields cannot establish general
 transport latency.
 

@@ -36,3 +36,8 @@ VNI 10100 to r1, plus VNI 10200 on r1/r2 with its bridge/SVI in VRF `red`. r1 ob
 default-VRF VTEPs and one red-VRF VTEP, alongside the L3 VNI. This checks that membership
 is scoped by VNI and VRF.
 Tests corrupt copies of these captures to exercise invalid and missing fields.
+
+`bfd_sbfd_{peers,counters}.json` were captured from the same FRR 10.4.3 image
+with an up named SBFD-init session (`qualified-first`) between IPv6 loopbacks
+`2001:db8::1` and `2001:db8::2`, reflector discriminator 4242. Its `bfd-name`
+marker must reject ordinary BFD collection even without an identity collision.

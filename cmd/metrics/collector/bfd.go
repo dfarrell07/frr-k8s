@@ -56,7 +56,8 @@ func (k bfdKey) labels() [5]string {
 
 type bfdSessionRow struct {
 	bfdKey
-	Status string `json:"status"`
+	Status string          `json:"status"`
+	Name   json.RawMessage `json:"bfd-name"` // present for unsupported named/SBFD modes
 }
 
 // The counters are pointers: a field FRR does not report is omitted, not 0.
@@ -120,6 +121,9 @@ func collectBFD(ctx context.Context, run Runner) ([]prometheus.Metric, error) {
 	for _, s := range sessions {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		if len(s.Name) != 0 {
+			return nil, fmt.Errorf("BFD session %d uses unsupported named/SBFD mode", s.ID)
 		}
 		if !s.valid() || s.Status == "" {
 			return nil, fmt.Errorf("BFD session has no ID, peer, multihop flag or status: %+v", s.bfdKey)
