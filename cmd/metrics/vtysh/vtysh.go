@@ -3,7 +3,8 @@
 package vtysh
 
 import (
-	"os/exec"
+	"context"
+	"time"
 
 	"github.com/metallb/frr-k8s/internal/frr"
 )
@@ -11,7 +12,9 @@ import (
 type Cli func(args string) (string, error)
 
 func Run(args string) (string, error) {
-	out, err := exec.Command("/usr/bin/vtysh", "-c", args).CombinedOutput() //#nosec G204 -- args are hardcoded vtysh commands from within this package
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	out, err := (Vtysh{}).Run(ctx, args)
 	return string(out), err
 }
 
