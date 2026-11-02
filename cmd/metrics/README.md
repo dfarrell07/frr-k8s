@@ -23,8 +23,9 @@ the daemons you run; selection does not change `/livez` requirements below.
 
 BFD intentionally adds `local,interface,multihop` to the existing `peer,vrf`
 labels: update BFD series joins and expected-session inventory for all five.
-Numbered BGP/BFD joins need `on(peer,vrf)` and grouping when multiple BFD
-sessions share a peer; unnumbered peers need an interface/address mapping.
+Numbered BGP/BFD joins must match `peer,vrf` plus scrape-target labels; use
+grouping when multiple BFD sessions share a peer. Unnumbered peers need an
+interface/address mapping.
 BFD-only VRFs are included. IDs correlate the two bulk
 reads and are never time-series labels. Missing/recreated sessions or duplicate
 identities fail the entire BFD collector for that scrape. Named/SBFD sessions
@@ -44,7 +45,7 @@ Authentication and concurrent FRR collection share `--scrape-timeout` (default
 authenticate, collect or write; excess requests return 503 before Kubernetes or
 FRR calls. Four scrapes may read FRR concurrently; excess authenticated requests
 return 503 before reading FRR. Slow responses release collection slots but
-retain request slots until writing and connection cleanup finish. Server
+retain request slots while handling the response. Server
 read/write deadlines bound clients. CLI output is limited to 32 MiB per command.
 
 Cached TokenReview lookups can outlive a scrape, under a ten-second timeout.
