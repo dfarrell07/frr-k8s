@@ -3,17 +3,18 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
-	stdlog "log"
+	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
-	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -28,6 +29,8 @@ import (
 )
 
 var (
+	collectorNames      = flag.String("collectors", "bgp,bfd", "Comma-separated collectors: bgp,bfd,evpn. EVPN is opt-in.")
+	scrapeTimeout       = flag.Duration("scrape-timeout", 8*time.Second, "Deadline for all FRR reads per scrape; keep below the scraper timeout.")
 	metricsPort         = flag.Uint("metrics-port", 9141, "Port to listen on for web interface.")
 	metricsBindAddress  = flag.String("metrics-bind-address", "0.0.0.0", "The address the metric endpoint binds to")
 	metricsPath         = flag.String("metrics-path", "/metrics", "Path under which to expose metrics.")
@@ -41,6 +44,8 @@ var (
 
 func main() {
 	flag.Parse()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	if err := logging.Init(); err != nil {
 		fmt.Printf("failed to initialize logging: %s\n", err)
@@ -58,7 +63,7 @@ func main() {
 		os.Exit(1)
 	}
 	mux.Handle(*metricsPath, metricsHandler)
-	mux.Handle("/livez", liveness.Handler(vtysh.Run, logger))
+	mux.Handle("/livez", liveness.Handler((vtysh.Vtysh{}).Run, logger))
 
 	tlsOpt, err := tlsconfig.OptFor(*tlsCipherSuites, *tlsCurvePreferences, *tlsMinVersionFlag)
 	if err != nil {
@@ -72,22 +77,27 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Addr:        fmt.Sprintf("%s:%d", *metricsBindAddress, *metricsPort),
-		ReadTimeout: 3 * time.Second,
-		Handler:     mux,
-		TLSConfig:   tlsCfg,
+		Addr:         net.JoinHostPort(*metricsBindAddress, fmt.Sprint(*metricsPort)),
+		ReadTimeout:  3 * time.Second,
+		WriteTimeout: *scrapeTimeout + 5*time.Second,
+		IdleTimeout:  2 * time.Minute,
+		Handler:      mux,
+		TLSConfig:    tlsCfg,
 	}
 
 	level.Info(logger).Log("msg", "Starting exporter", "metricsPath", *metricsPath, "port", *metricsPort, "metricsAuthDisabled", *disableMetricsAuth)
 
-	if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+	if err := serve(ctx, srv, 5*time.Second); err != nil && err != http.ErrServerClosed {
 		level.Error(logger).Log("error", err)
 		os.Exit(1)
 	}
 }
 
 func newMetricsHandler(disableAuth bool) (http.Handler, error) {
-	handler := promHandler()
+	handler, err := promHandler()
+	if err != nil {
+		return nil, err
+	}
 	if disableAuth {
 		return handler, nil
 	}
@@ -98,23 +108,16 @@ func newMetricsHandler(disableAuth bool) (http.Handler, error) {
 	return filter(ctrl.Log.WithName("metrics-auth"), handler)
 }
 
-func promHandler() http.Handler {
-	logger := logging.GetLogger()
-	BGPCollector := collector.NewBGP(logger)
-	BFDCollector := collector.NewBFD(logger)
-
-	registry := prometheus.NewRegistry()
-	registry.MustRegister(BGPCollector)
-	registry.MustRegister(BFDCollector)
-
-	return promhttp.HandlerFor(
-		prometheus.Gatherers{prometheus.DefaultGatherer, registry},
-		promhttp.HandlerOpts{
-			ErrorLog:      stdlog.New(log.NewStdlibAdapter(level.Error(logger)), "", 0),
-			ErrorHandling: promhttp.ContinueOnError,
-			Registry:      registry,
-		},
-	)
+func promHandler() (http.Handler, error) {
+	cs, err := collector.Select(*collectorNames)
+	if err != nil {
+		return nil, err
+	}
+	if *scrapeTimeout <= 0 {
+		return nil, fmt.Errorf("scrape-timeout must be positive")
+	}
+	return &exporter{run: (vtysh.Vtysh{}).Run, cs: cs, timeout: *scrapeTimeout,
+		base: prometheus.DefaultGatherer, httpMetrics: prometheus.NewRegistry(), sem: make(chan struct{}, maxScrapes), responses: make(chan struct{}, maxResponses), logger: logging.GetLogger()}, nil
 }
 
 func rbacFilter() (metricsserver.Filter, error) {

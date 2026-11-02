@@ -3,16 +3,27 @@
 package liveness
 
 import (
+	"context"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-kit/log"
-	"github.com/metallb/frr-k8s/cmd/metrics/vtysh"
 )
 
-func Handler(frrCli vtysh.Cli, logger log.Logger) http.Handler {
+func Handler(frrCli func(context.Context, string) ([]byte, error), logger log.Logger) http.Handler {
+	slots := make(chan struct{}, 1)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		res, err := frrCli("show daemons")
+		select {
+		case slots <- struct{}{}:
+			defer func() { <-slots }()
+		default:
+			http.Error(w, "probe in progress", http.StatusServiceUnavailable)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+		defer cancel()
+		res, err := frrCli(ctx, "show daemons")
 		if err != nil {
 			http.Error(w, "failed to call show daemons", http.StatusInternalServerError)
 			logger.Log("failed to call show daemons", err)
@@ -26,7 +37,7 @@ func Handler(frrCli vtysh.Cli, logger log.Logger) http.Handler {
 			"zebra":    {},
 		}
 
-		runningDaemons := strings.Split(strings.TrimSuffix(res, "\n"), " ")
+		runningDaemons := strings.Fields(string(res))
 		for _, d := range runningDaemons {
 			delete(expected, d)
 		}

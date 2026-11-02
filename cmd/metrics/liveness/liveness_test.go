@@ -3,6 +3,7 @@
 package liveness
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -45,8 +46,8 @@ func TestLiveness(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.desc, func(t *testing.T) {
 			w := httptest.NewRecorder()
-			vtysh := func(args string) (string, error) {
-				return test.vtyshRes, test.vtyshError
+			vtysh := func(_ context.Context, args string) ([]byte, error) {
+				return []byte(test.vtyshRes), test.vtyshError
 			}
 			handler := Handler(vtysh, logger)
 			handler.ServeHTTP(w, req)

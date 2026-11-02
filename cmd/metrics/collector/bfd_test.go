@@ -7,7 +7,8 @@ import (
 	"testing"
 	"text/template"
 
-	"github.com/go-kit/log"
+	"context"
+
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
@@ -15,28 +16,28 @@ var (
 	bfdMetricsTmpl = `
 	# HELP frrk8s_bfd_session_up BFD session state (1 is up, 0 is down)
 	# TYPE frrk8s_bfd_session_up gauge
-	frrk8s_bfd_session_up{peer="{{ .Peer }}", vrf="{{ .NeighborVRF }}"} {{ .SessionUp }}
+	frrk8s_bfd_session_up{interface="eth0",local="{{.Local}}",multihop="false",peer="{{ .Peer }}", vrf="{{ .NeighborVRF }}"} {{ .SessionUp }}
 	# HELP frrk8s_bfd_control_packet_input Number of received BFD control packets
 	# TYPE frrk8s_bfd_control_packet_input counter
-	frrk8s_bfd_control_packet_input{peer="{{ .Peer }}", vrf="{{ .NeighborVRF }}"} {{ .ControlPacketInput }}
+	frrk8s_bfd_control_packet_input{interface="eth0",local="{{.Local}}",multihop="false",peer="{{ .Peer }}", vrf="{{ .NeighborVRF }}"} {{ .ControlPacketInput }}
 	# HELP frrk8s_bfd_control_packet_output Number of sent BFD control packets
 	# TYPE frrk8s_bfd_control_packet_output counter
-	frrk8s_bfd_control_packet_output{peer="{{ .Peer }}", vrf="{{ .NeighborVRF }}"} {{ .ControlPacketOutput }}
+	frrk8s_bfd_control_packet_output{interface="eth0",local="{{.Local}}",multihop="false",peer="{{ .Peer }}", vrf="{{ .NeighborVRF }}"} {{ .ControlPacketOutput }}
 	# HELP frrk8s_bfd_echo_packet_input Number of received BFD echo packets
 	# TYPE frrk8s_bfd_echo_packet_input counter
-	frrk8s_bfd_echo_packet_input{peer="{{ .Peer }}", vrf="{{ .NeighborVRF }}"} {{ .EchoPacketInput }}
+	frrk8s_bfd_echo_packet_input{interface="eth0",local="{{.Local}}",multihop="false",peer="{{ .Peer }}", vrf="{{ .NeighborVRF }}"} {{ .EchoPacketInput }}
 	# HELP frrk8s_bfd_echo_packet_output Number of sent BFD echo packets
 	# TYPE frrk8s_bfd_echo_packet_output counter
-	frrk8s_bfd_echo_packet_output{peer="{{ .Peer }}", vrf="{{ .NeighborVRF }}"} {{ .EchoPacketOutput }}
+	frrk8s_bfd_echo_packet_output{interface="eth0",local="{{.Local}}",multihop="false",peer="{{ .Peer }}", vrf="{{ .NeighborVRF }}"} {{ .EchoPacketOutput }}
 	# HELP frrk8s_bfd_session_down_events Number of BFD session down events
 	# TYPE frrk8s_bfd_session_down_events counter
-	frrk8s_bfd_session_down_events{peer="{{ .Peer }}", vrf="{{ .NeighborVRF }}"} {{ .SessionDownEvents }}
+	frrk8s_bfd_session_down_events{interface="eth0",local="{{.Local}}",multihop="false",peer="{{ .Peer }}", vrf="{{ .NeighborVRF }}"} {{ .SessionDownEvents }}
 	# HELP frrk8s_bfd_session_up_events Number of BFD session up events
 	# TYPE frrk8s_bfd_session_up_events counter
-	frrk8s_bfd_session_up_events{peer="{{ .Peer }}", vrf="{{ .NeighborVRF }}"} {{ .SessionUpEvents }}
+	frrk8s_bfd_session_up_events{interface="eth0",local="{{.Local}}",multihop="false",peer="{{ .Peer }}", vrf="{{ .NeighborVRF }}"} {{ .SessionUpEvents }}
 	# HELP frrk8s_bfd_zebra_notifications Number of BFD zebra notifications
 	# TYPE frrk8s_bfd_zebra_notifications counter
-	frrk8s_bfd_zebra_notifications{peer="{{ .Peer }}", vrf="{{ .NeighborVRF }}"} {{ .ZebraNotifications }}
+	frrk8s_bfd_zebra_notifications{interface="eth0",local="{{.Local}}",multihop="false",peer="{{ .Peer }}", vrf="{{ .NeighborVRF }}"} {{ .ZebraNotifications }}
 	`
 
 	bfdTests = []struct {
@@ -45,6 +46,7 @@ var (
 		vtyshPeersCountersOutput string
 		peer                     string
 		vrf                      string
+		local                    string
 		sessionUp                int
 		controlPacketInput       int
 		controlPacketOutput      int
@@ -74,6 +76,7 @@ var (
 			vtyshPeersOutput:         peersIPv6,
 			vtyshPeersCountersOutput: peersCountersIPv6,
 			peer:                     "fc00:f853:ccd:e793::4",
+			local:                    "fc00:f853:ccd:e793::6",
 			vrf:                      "default",
 			sessionUp:                0,
 			controlPacketInput:       10,
@@ -140,6 +143,7 @@ var (
 	[
 		{
 			"multihop":false,
+"id":2508913041,
 			"peer":"172.18.0.4",
 			"vrf":"default",
 			"interface":"eth0",
@@ -157,6 +161,7 @@ var (
 	[
 		{
 			"multihop":false,
+"id":1975516641,
 			"peer":"fc00:f853:ccd:e793::4",
 			"local":"fc00:f853:ccd:e793::6",
 			"vrf":"default",
@@ -193,28 +198,20 @@ func TestBFDCollect(t *testing.T) {
 				"SessionDownEvents":   test.sessionDownEvents,
 				"ZebraNotifications":  test.zebraNotifications,
 				"NeighborVRF":         "default",
+				"Local":               test.local,
 			})
 
 			if err != nil {
 				t.Errorf("expected no error but got %s", err)
 			}
 
-			l := log.NewNopLogger()
-			collector := mockNewBFD(l)
-			cmdOutput := map[string]string{
-				"show bgp vrf all json":                    vrfVtysh,
-				"show bfd vrf default peers json":          test.vtyshPeersOutput,
-				"show bfd vrf red peers json":              "[]",
-				"show bfd vrf default peers counters json": test.vtyshPeersCountersOutput,
-				"show bfd vrf red peers counters json":     "[]",
+			ms, err := collectBFD(context.Background(), fake(map[string]string{
+				peersCmd: test.vtyshPeersOutput, countersCmd: test.vtyshPeersCountersOutput,
+			}))
+			if err != nil {
+				t.Fatal(err)
 			}
-			collector.frrCli = func(args string) (string, error) {
-				res, ok := cmdOutput[args]
-				if !ok {
-					return "{}", nil
-				}
-				return res, nil
-			}
+			collector := Snapshot(ms)
 			buf := bytes.NewReader(w.Bytes())
 			err = testutil.CollectAndCompare(collector, buf)
 			if err != nil {

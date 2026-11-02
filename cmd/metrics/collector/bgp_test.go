@@ -4,10 +4,13 @@ package collector
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 	"text/template"
 
-	"github.com/go-kit/log"
+	"context"
+
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
@@ -376,69 +379,6 @@ var (
 		}
 	  }	  
 	`
-	vrfVtysh = `{
-		"default":{
-		 "vrfId": 0,
-		 "vrfName": "default",
-		 "tableVersion": 1,
-		 "routerId": "172.18.0.3",
-		 "defaultLocPrf": 100,
-		 "localAS": 64512,
-		 "routes": { "192.168.10.0/32": [
-		  {
-			"valid":true,
-			"bestpath":true,
-			"pathFrom":"external",
-			"prefix":"192.168.10.0",
-			"prefixLen":32,
-			"network":"192.168.10.0\/32",
-			"metric":0,
-			"weight":32768,
-			"peerId":"(unspec)",
-			"path":"",
-			"origin":"IGP",
-			"nexthops":[
-			  {
-				"ip":"0.0.0.0",
-				"hostname":"kind-control-plane",
-				"afi":"ipv4",
-				"used":true
-			  }
-			]
-		  }
-		] }  }
-		,
-		"red":{
-		 "vrfId": 5,
-		 "vrfName": "red",
-		 "tableVersion": 1,
-		 "routerId": "172.31.0.4",
-		 "defaultLocPrf": 100,
-		 "localAS": 64512,
-		 "routes": { "192.168.10.0/32": [
-		  {
-			"valid":true,
-			"bestpath":true,
-			"pathFrom":"external",
-			"prefix":"192.168.10.0",
-			"prefixLen":32,
-			"network":"192.168.10.0\/32",
-			"metric":0,
-			"weight":32768,
-			"peerId":"(unspec)",
-			"path":"",
-			"origin":"IGP",
-			"nexthops":[
-			  {
-				"ip":"0.0.0.0",
-				"hostname":"kind-control-plane",
-				"afi":"ipv4",
-				"used":true
-			  }
-			]
-		  }
-		] }  }
-		}`
 )
 
 func TestCollect(t *testing.T) {
@@ -472,19 +412,18 @@ func TestCollect(t *testing.T) {
 				t.Errorf("expected no error but got %s", err)
 			}
 
-			l := log.NewNopLogger()
-			collector := mocknewBGP(l)
-			cmdOutput := map[string]string{
-				"show bgp vrf all json":               vrfVtysh,
-				"show bgp vrf default neighbors json": tc.vtyshOutput,
+			ms, err := collectBGP(context.Background(), fake(map[string]string{bgpCmd: `{"default":` + tc.vtyshOutput + `}`}))
+			if err != nil {
+				t.Fatal(err)
 			}
-			collector.frrCli = func(args string) (string, error) {
-				res, ok := cmdOutput[args]
-				if !ok {
-					return "{}", nil
+			// The original fixture expects the existing series only.
+			var legacy []prometheus.Metric
+			for _, m := range ms {
+				if !strings.Contains(m.Desc().String(), "bgp_family_") {
+					legacy = append(legacy, m)
 				}
-				return res, nil
 			}
+			collector := Snapshot(legacy)
 			buf := bytes.NewReader(w.Bytes())
 			err = testutil.CollectAndCompare(collector, buf)
 			if err != nil {
