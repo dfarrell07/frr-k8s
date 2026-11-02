@@ -3,11 +3,15 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	stdlog "log"
+	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/go-kit/log"
@@ -41,6 +45,8 @@ var (
 
 func main() {
 	flag.Parse()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
 	if err := logging.Init(); err != nil {
 		fmt.Printf("failed to initialize logging: %s\n", err)
@@ -65,22 +71,24 @@ func main() {
 		level.Error(logger).Log("msg", "failed to parse TLS flags", "error", err)
 		os.Exit(1)
 	}
-	tlsCfg, err := tlsconfig.For(tlsOpt, *tlsCertFile, *tlsKeyFile)
+	tlsCfg, err := tlsconfig.ForContext(ctx, tlsOpt, *tlsCertFile, *tlsKeyFile)
 	if err != nil {
 		level.Error(logger).Log("msg", "failed to configure TLS", "error", err)
 		os.Exit(1)
 	}
 
 	srv := &http.Server{
-		Addr:        fmt.Sprintf("%s:%d", *metricsBindAddress, *metricsPort),
-		ReadTimeout: 3 * time.Second,
-		Handler:     mux,
-		TLSConfig:   tlsCfg,
+		Addr:         net.JoinHostPort(*metricsBindAddress, fmt.Sprint(*metricsPort)),
+		ReadTimeout:  3 * time.Second,
+		WriteTimeout: 13 * time.Second,
+		IdleTimeout:  2 * time.Minute,
+		Handler:      mux,
+		TLSConfig:    tlsCfg,
 	}
 
 	level.Info(logger).Log("msg", "Starting exporter", "metricsPath", *metricsPath, "port", *metricsPort, "metricsAuthDisabled", *disableMetricsAuth)
 
-	if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+	if err := serve(ctx, srv, 5*time.Second); err != nil {
 		level.Error(logger).Log("error", err)
 		os.Exit(1)
 	}
