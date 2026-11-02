@@ -91,6 +91,8 @@ removing trust. This does not implement certificate revocation lists.
 
 Run `go test -race ./cmd/metrics/... ./internal/tlsconfig/...`; parser tests use
 [real captures](collector/testdata/README.md) and malformed variants.
+`bash hack/metrics-constructor-test.sh` checks the unchanged Kubernetes constructor
+with isolated fixture credentials; ordinary Go tests skip this container case.
 
 Run `bash hack/metrics-smoke.sh` (podman, openssl, curl, Linux
 802.3ad bonding, and Go unless using an existing binary).
