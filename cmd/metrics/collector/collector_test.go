@@ -1,0 +1,553 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package collector
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"testing"
+
+	"github.com/go-kit/log"
+
+	"github.com/prometheus/client_golang/prometheus"
+)
+
+var discard = log.NewNopLogger()
+
+// fake serves canned vtysh output by command. A value starting with "@" is a
+// file in testdata; a missing command is an error.
+func fake(replies map[string]string) Runner {
+	return func(ctx context.Context, command string) ([]byte, error) {
+		if err := ctx.Err(); err != nil { // like a real vtysh, which cannot start once the deadline has passed
+			return nil, err
+		}
+		r, ok := replies[command]
+		if !ok {
+			return nil, fmt.Errorf("unexpected command %q", command)
+		}
+		if name, isFile := strings.CutPrefix(r, "@"); isFile {
+			return os.ReadFile(filepath.Join("testdata", name))
+		}
+		return []byte(r), nil
+	}
+}
+
+// series gathers ms through a pedantic registry, which also proves no two
+// metrics share a name and label set, and returns `name{labels}` -> value.
+func series(t *testing.T, ms []prometheus.Metric) map[string]float64 {
+	t.Helper()
+	reg := prometheus.NewPedanticRegistry()
+	reg.MustRegister(Snapshot(ms))
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gathering: %v", err)
+	}
+	out := map[string]float64{}
+	for _, f := range families {
+		for _, m := range f.Metric {
+			var ls []string
+			for _, l := range m.Label {
+				ls = append(ls, fmt.Sprintf("%s=%q", l.GetName(), l.GetValue()))
+			}
+			v := m.GetGauge().GetValue() + m.GetCounter().GetValue()
+			out[f.GetName()+"{"+strings.Join(ls, ",")+"}"] = v
+		}
+	}
+	return out
+}
+
+func expect(t *testing.T, got, want map[string]float64) {
+	t.Helper()
+	for k, v := range want {
+		if g, ok := got[k]; !ok || g != v {
+			t.Errorf("%s = %v (present %v), want %v", k, g, ok, v)
+		}
+	}
+}
+
+func absent(t *testing.T, got map[string]float64, prefixes ...string) {
+	t.Helper()
+	var keys []string
+	for k := range got {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		for _, p := range prefixes {
+			if strings.HasPrefix(k, p) {
+				t.Errorf("unexpected series %s", k)
+			}
+		}
+	}
+}
+
+const bgpCmd = "show bgp vrf all neighbors json"
+
+func TestBGPFromRealFRR(t *testing.T) {
+	ms, err := collectBGP(context.Background(), fake(map[string]string{bgpCmd: "@bgp_neighbors.json"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := series(t, ms)
+	const p = `{peer="10.78.0.3",vrf="default"}`
+	expect(t, got, map[string]float64{
+		"frrk8s_bgp_session_up" + p:               1,
+		"frrk8s_bgp_announced_prefixes_total" + p: 4, // 1 IPv4 + 3 EVPN
+		"frrk8s_bgp_received_prefixes_total" + p:  2,
+		"frrk8s_bgp_opens_sent" + p:               2,
+		"frrk8s_bgp_total_received" + p:           8,
+		"frrk8s_bgp_updates_total" + p:            6,
+		`frrk8s_bgp_family_received_prefixes{afi="ipv4",peer="10.78.0.3",safi="unicast",vrf="default"}`:  1,
+		`frrk8s_bgp_family_received_prefixes{afi="l2vpn",peer="10.78.0.3",safi="evpn",vrf="default"}`:    1,
+		`frrk8s_bgp_family_announced_prefixes{afi="ipv4",peer="10.78.0.3",safi="unicast",vrf="default"}`: 1,
+		`frrk8s_bgp_family_announced_prefixes{afi="l2vpn",peer="10.78.0.3",safi="evpn",vrf="default"}`:   3,
+	})
+	// The VRF without peers contributes nothing.
+	absent(t, got, `frrk8s_bgp_session_up{peer="vrf`)
+	for k := range got {
+		if strings.Contains(k, `vrf="red"`) {
+			t.Errorf("series for a VRF without peers: %s", k)
+		}
+	}
+}
+
+func TestBGPFamilies(t *testing.T) {
+	reply := `{
+	  "default": {"vrfId": 0, "vrfName": "default",
+	    "192.0.2.1": {"bgpState": "Established", "messageStats": {"totalSent": 5, "opensSent": null},
+	      "addressFamilyInfo": {
+	        "ipv4Unicast": {"acceptedPrefixCounter": 2},
+	        "ipv4Flowspec": {"acceptedPrefixCounter": 4, "sentPrefixCounter": 1}}},
+	    "192.0.2.2": {"bgpState": "Established",
+	      "addressFamilyInfo": {"l2VpnEvpn": {"acceptedPrefixCounter": 7, "sentPrefixCounter": 5}}},
+	    "192.0.2.3": {"bgpState": "Active"},
+    "192.0.2.4": {"bgpState": "Established", "addressFamilyInfo": {
+      "ipv6Unicast": {"sentPrefixCounter": 11, "acceptedPrefixCounter": 13},
+      "ipv4Vpn": {"sentPrefixCounter": 17, "acceptedPrefixCounter": 19}}}}}`
+	ms, err := collectBGP(context.Background(), fake(map[string]string{bgpCmd: reply}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := series(t, ms)
+	expect(t, got, map[string]float64{
+		// No sentPrefixCounter: the new announced gauge is omitted, received is kept.
+		`frrk8s_bgp_family_received_prefixes{afi="ipv4",peer="192.0.2.1",safi="unicast",vrf="default"}`: 2,
+		// An unknown family counts in the totals only, so the totals include it.
+		`frrk8s_bgp_received_prefixes_total{peer="192.0.2.1",vrf="default"}`:  6,
+		`frrk8s_bgp_announced_prefixes_total{peer="192.0.2.1",vrf="default"}`: 1,
+		// An EVPN-only peer: the totals equal its EVPN counts.
+		`frrk8s_bgp_received_prefixes_total{peer="192.0.2.2",vrf="default"}`:                             7,
+		`frrk8s_bgp_announced_prefixes_total{peer="192.0.2.2",vrf="default"}`:                            5,
+		`frrk8s_bgp_session_up{peer="192.0.2.3",vrf="default"}`:                                          0,
+		`frrk8s_bgp_family_announced_prefixes{afi="ipv6",peer="192.0.2.4",safi="unicast",vrf="default"}`: 11,
+		`frrk8s_bgp_family_received_prefixes{afi="ipv6",peer="192.0.2.4",safi="unicast",vrf="default"}`:  13,
+		`frrk8s_bgp_family_announced_prefixes{afi="ipv4",peer="192.0.2.4",safi="vpn",vrf="default"}`:     17,
+		`frrk8s_bgp_family_received_prefixes{afi="ipv4",peer="192.0.2.4",safi="vpn",vrf="default"}`:      19,
+		`frrk8s_bgp_announced_prefixes_total{peer="192.0.2.4",vrf="default"}`:                            28,
+		`frrk8s_bgp_received_prefixes_total{peer="192.0.2.4",vrf="default"}`:                             32,
+	})
+	absent(t, got,
+		`frrk8s_bgp_family_announced_prefixes{afi="ipv4",peer="192.0.2.1"`,
+		`frrk8s_bgp_family_received_prefixes{afi="ipv4",peer="192.0.2.1",safi="flowspec"`,
+		`frrk8s_bgp_family_received_prefixes{afi="ipv4",peer="192.0.2.3"`,
+		// A message counter FRR did not report is absent, not zero.
+		`frrk8s_bgp_opens_sent{peer="192.0.2.1"`)
+}
+
+func TestBGPPeersInVRFsAndDownPeersFromRealFRR(t *testing.T) {
+	// Real FRR output: an unnumbered peer (keyed by interface), an IPv4 and an
+	// IPv6 peer in the default VRF, and a peer in VRF red, none established.
+	// FRR reports acceptedPrefixCounter 0 and no sentPrefixCounter for them.
+	ms, err := collectBGP(context.Background(), fake(map[string]string{bgpCmd: "@bgp_neighbors_down.json"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := series(t, ms)
+	expect(t, got, map[string]float64{
+		`frrk8s_bgp_session_up{peer="eth0",vrf="default"}`:                                           0,
+		`frrk8s_bgp_session_up{peer="10.79.0.50",vrf="default"}`:                                     0,
+		`frrk8s_bgp_session_up{peer="fd00::5",vrf="default"}`:                                        0,
+		`frrk8s_bgp_session_up{peer="10.79.0.60",vrf="red"}`:                                         0,
+		`frrk8s_bgp_family_received_prefixes{afi="ipv4",peer="10.79.0.60",safi="unicast",vrf="red"}`: 0,
+		`frrk8s_bgp_announced_prefixes_total{peer="10.79.0.60",vrf="red"}`:                           0,
+	})
+	absent(t, got, "frrk8s_bgp_family_announced_prefixes")
+}
+
+func TestBGPBookkeepingNamesCanBeInterfacePeersFromRealFRR(t *testing.T) {
+	ms, err := collectBGP(context.Background(), fake(map[string]string{bgpCmd: "@bgp_reserved_interfaces.json"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := series(t, ms)
+	for _, peer := range []string{"vrfId", "vrfName", "10.201.13.3"} {
+		expect(t, got, map[string]float64{
+			fmt.Sprintf(`frrk8s_bgp_session_up{peer=%q,vrf="default"}`, peer): 0,
+		})
+	}
+}
+
+func TestBGPUnknownKernelVRFFromRealFRR(t *testing.T) {
+	// FRR reports vrfId -1 while the BGP VRF is configured without a kernel VRF.
+	ms, err := collectBGP(context.Background(), fake(map[string]string{bgpCmd: "@bgp_unknown_vrf.json"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	expect(t, series(t, ms), map[string]float64{
+		`frrk8s_bgp_session_up{peer="192.0.2.10",vrf="absent"}`: 0,
+	})
+}
+
+func TestMalformedReadsEmitNothing(t *testing.T) {
+	for name, tc := range map[string]struct {
+		c       Collector
+		replies map[string]string
+	}{
+		"bgp not json":      {all[0], map[string]string{bgpCmd: "not json"}},
+		"bgp null":          {all[0], map[string]string{bgpCmd: "null"}},
+		"bgp null vrf":      {all[0], map[string]string{bgpCmd: `{"default":null}`}},
+		"bgp empty peer":    {all[0], map[string]string{bgpCmd: `{"default":{"192.0.2.1":{}}}`}},
+		"bgp null peer":     {all[0], map[string]string{bgpCmd: `{"default":{"192.0.2.1":null}}`}},
+		"bgp wrong type":    {all[0], map[string]string{bgpCmd: `{"default":{"192.0.2.1":{"messageStats":"x"}}}`}},
+		"bfd not json":      {all[1], map[string]string{"show bfd peers json": "[", "show bfd peers counters json": "[]"}},
+		"bfd null peers":    {all[1], map[string]string{peersCmd: "null", countersCmd: "[]"}},
+		"bfd null counters": {all[1], map[string]string{peersCmd: "[]", countersCmd: "null"}},
+		"bfd command fails": {all[1], map[string]string{"show bfd peers json": "[]"}},
+	} {
+		ms := Gather(context.Background(), fake(tc.replies), []Collector{tc.c}, discard)
+		got := series(t, ms)
+		key := fmt.Sprintf(`frrk8s_scrape_collector_success{collector=%q}`, tc.c.Name)
+		if v, ok := got[key]; !ok || v != 0 {
+			t.Errorf("%s: %s = %v (present %v), want 0", name, key, v, ok)
+		}
+		for k := range got {
+			if !strings.HasPrefix(k, "frrk8s_scrape_collector_") {
+				t.Errorf("%s: failed collector emitted %s", name, k)
+			}
+		}
+	}
+}
+
+func TestCorruptFixtureFieldsFailOnlyTheirCollector(t *testing.T) {
+	// Corrupt real captures: unknown/absent measurements must not turn into
+	// zero, and malformed identities must not become plausible inventory.
+	for _, tc := range []struct {
+		name, collector, command, from, to string
+	}{
+		{"bgp missing state", "bgp", bgpCmd, `"bgpState":"Established"`, `"bgpState":null`},
+		{"bgp empty vrf", "bgp", bgpCmd, `"default":`, `"":`},
+		{"bgp empty peer", "bgp", bgpCmd, `"10.78.0.3":`, `"":`},
+		{"bgp negative count", "bgp", bgpCmd, `"acceptedPrefixCounter":1`, `"acceptedPrefixCounter":-1`},
+		{"bgp fractional count", "bgp", bgpCmd, `"sentPrefixCounter":1`, `"sentPrefixCounter":1.5`},
+		{"bgp negative counter", "bgp", bgpCmd, `"opensSent":2`, `"opensSent":-2`},
+		{"bfd missing id", "bfd", peersCmd, `"id":2149748673`, `"id":null`},
+		{"bfd missing peer", "bfd", peersCmd, `"peer":"10.78.0.3"`, `"peer":null`},
+		{"bfd missing mode", "bfd", peersCmd, `"multihop":false`, `"multihop":null`},
+		{"bfd missing status", "bfd", peersCmd, `"status":"up"`, `"status":null`},
+		{"bfd counter missing id", "bfd", countersCmd, `"id":2149748673`, `"id":null`},
+		{"bfd counter missing peer", "bfd", countersCmd, `"peer":"10.78.0.3"`, `"peer":null`},
+		{"bfd counter missing mode", "bfd", countersCmd, `"multihop":false`, `"multihop":null`},
+		{"bfd negative counter", "bfd", countersCmd, `"control-packet-input":107`, `"control-packet-input":-1`},
+		{"bfd fractional counter", "bfd", countersCmd, `"control-packet-input":107`, `"control-packet-input":1.5`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			replies := map[string]string{bgpCmd: "@bgp_neighbors.json", peersCmd: "@bfd_peers.json",
+				countersCmd: "@bfd_counters.json"}
+			raw, err := fake(replies)(context.Background(), tc.command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(raw), tc.from) {
+				t.Fatalf("fixture does not contain %s", tc.from)
+			}
+			replies[tc.command] = strings.Replace(string(raw), tc.from, tc.to, 1)
+			got := series(t, Gather(context.Background(), fake(replies), all, discard))
+			for _, c := range all {
+				want := 1.0
+				if c.Name == tc.collector {
+					want = 0
+				}
+				expect(t, got, map[string]float64{fmt.Sprintf(`frrk8s_scrape_collector_success{collector=%q}`, c.Name): want})
+			}
+			absent(t, got, "frrk8s_"+tc.collector+"_")
+		})
+	}
+}
+
+func TestBFDFromRealFRR(t *testing.T) {
+	ms, err := collectBFD(context.Background(), fake(map[string]string{
+		"show bfd peers json": "@bfd_peers.json", "show bfd peers counters json": "@bfd_counters.json"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const id = `{peer="10.78.0.3",vrf="default"}`
+	expect(t, series(t, ms), map[string]float64{
+		"frrk8s_bfd_session_up" + id:           1,
+		"frrk8s_bfd_control_packet_input" + id: 107,
+		"frrk8s_bfd_session_up_events" + id:    1,
+		"frrk8s_bfd_zebra_notifications" + id:  2,
+	})
+}
+
+const (
+	peersCmd    = "show bfd peers json"
+	countersCmd = "show bfd peers counters json"
+)
+
+func TestBFDAmbiguousLegacyLabelsFailAtomically(t *testing.T) {
+	ms, err := collectBFD(context.Background(), fake(map[string]string{
+		peersCmd: "@bfd_identity_peers.json", countersCmd: "@bfd_identity_counters.json"}))
+	if err == nil || len(ms) != 0 {
+		t.Fatalf("ambiguous peer/VRF identity emitted %d metrics, error %v", len(ms), err)
+	}
+}
+
+func bfdRow(id uint32, peer, local string, multihop bool) string {
+	return fmt.Sprintf(`{"id":%d,"peer":%q,"vrf":"default","local":%q,"multihop":%t,"status":"up","control-packet-input":5}`, id, peer, local, multihop)
+}
+
+func TestBFDDuplicateIdentitiesFail(t *testing.T) {
+	a := bfdRow(1, "192.0.2.1", "192.0.2.10", true)
+	b := strings.Replace(a, `"id":1`, `"id":2`, 1)
+	for name, tc := range map[string]struct{ peers, counters string }{
+		"duplicate session":         {"[" + a + "," + a + "]", "[]"},
+		"duplicate counter row":     {"[]", "[" + a + "," + a + "]"},
+		"distinct ids share labels": {"[" + a + "," + b + "]", "[" + a + "," + b + "]"},
+	} {
+		if _, err := collectBFD(context.Background(), fake(map[string]string{peersCmd: tc.peers, countersCmd: tc.counters})); err == nil {
+			t.Errorf("%s: want error", name)
+		}
+	}
+}
+
+func TestBFDInvalidIdentityInBothReads(t *testing.T) {
+	for _, field := range []string{`"id":2149748673`, `"peer":"10.78.0.3"`, `"multihop":false`} {
+		t.Run(field, func(t *testing.T) {
+			replies := map[string]string{peersCmd: "@bfd_peers.json", countersCmd: "@bfd_counters.json"}
+			for command := range replies {
+				raw, err := fake(replies)(context.Background(), command)
+				if err != nil {
+					t.Fatal(err)
+				}
+				replies[command] = strings.Replace(string(raw), field, strings.SplitN(field, ":", 2)[0]+":null", 1)
+			}
+			if ms, err := collectBFD(context.Background(), fake(replies)); err == nil || len(ms) != 0 {
+				t.Errorf("invalid identity: %d metrics, error %v", len(ms), err)
+			}
+		})
+	}
+}
+
+func TestBFDSnapshotMismatchFailsAtomically(t *testing.T) {
+	a := bfdRow(1, "192.0.2.1", "192.0.2.10", true)
+	b := bfdRow(2, "192.0.2.2", "192.0.2.20", true)
+	for name, replies := range map[string][2]string{
+		"missing counters":     {"[" + a + "," + b + "]", "[" + a + "]"},
+		"missing session":      {"[" + a + "]", "[" + a + "," + b + "]"},
+		"recreated session":    {"[" + a + "]", "[" + strings.Replace(a, `"id":1`, `"id":2`, 1) + "]"},
+		"changed identity":     {"[" + a + "]", "[" + strings.Replace(a, "192.0.2.10", "192.0.2.11", 1) + "]"},
+		"reused session id":    {"[" + a + "," + strings.Replace(b, `"id":2`, `"id":1`, 1) + "]", "[" + a + "," + b + "]"},
+		"duplicate counter id": {"[" + a + "," + b + "]", "[" + a + "," + strings.Replace(b, `"id":2`, `"id":1`, 1) + "]"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			run := fake(map[string]string{peersCmd: replies[0], countersCmd: replies[1]})
+			if ms, err := collectBFD(context.Background(), run); err == nil || len(ms) != 0 {
+				t.Errorf("mismatched snapshot: %d metrics, error %v", len(ms), err)
+			}
+			got := series(t, Gather(context.Background(), run, all[1:2], discard))
+			expect(t, got, map[string]float64{`frrk8s_scrape_collector_success{collector="bfd"}`: 0})
+			absent(t, got, "frrk8s_bfd_")
+		})
+	}
+}
+
+func TestBFDMissingCounterIsOmittedNotZero(t *testing.T) {
+	row := `{"id":1,"peer":"192.0.2.1","vrf":"default","local":"192.0.2.10","multihop":false,"interface":"eth0","control-packet-input":9}`
+	ms, err := collectBFD(context.Background(), fake(map[string]string{
+		peersCmd:    `[{"id":1,"peer":"192.0.2.1","vrf":"default","local":"192.0.2.10","multihop":false,"interface":"eth0","status":"up"}]`,
+		countersCmd: "[" + row + "]"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := series(t, ms)
+	expect(t, got, map[string]float64{
+		`frrk8s_bfd_control_packet_input{peer="192.0.2.1",vrf="default"}`: 9})
+	absent(t, got, "frrk8s_bfd_echo_", "frrk8s_bfd_zebra", "frrk8s_bfd_control_packet_output", "frrk8s_bfd_session_up_events", "frrk8s_bfd_session_down_events")
+}
+
+func TestBFDMultihopFromRealFRR(t *testing.T) {
+	// Real FRR: a multihop session has no interface key, and both replies
+	// carry the same identity, which is what the join relies on.
+	ms, err := collectBFD(context.Background(), fake(map[string]string{
+		peersCmd: "@bfd_multihop_peers.json", countersCmd: "@bfd_multihop_counters.json"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const id = `{peer="10.80.0.3",vrf="default"}`
+	expect(t, series(t, ms), map[string]float64{
+		"frrk8s_bfd_session_up" + id:           1,
+		"frrk8s_bfd_control_packet_input" + id: 49,
+	})
+}
+
+func TestFailedCollectorDropsPartialData(t *testing.T) {
+	partial := Collector{"partial", func(context.Context, Runner) ([]prometheus.Metric, error) {
+		return []prometheus.Metric{prometheus.MustNewConstMetric(bgpSessionUp, prometheus.GaugeValue, 1, "p", "v")}, fmt.Errorf("second read failed")
+	}}
+	got := series(t, Gather(context.Background(), nil, []Collector{partial}, discard))
+	absent(t, got, "frrk8s_bgp_")
+	expect(t, got, map[string]float64{`frrk8s_scrape_collector_success{collector="partial"}`: 0})
+}
+
+func TestBFDSessionWithoutStatusIsMalformed(t *testing.T) {
+	row := `{"id":1,"peer":"192.0.2.1","vrf":"default","local":"192.0.2.10","multihop":true}`
+	if _, err := collectBFD(context.Background(), fake(map[string]string{peersCmd: "[" + row + "]", countersCmd: "[]"})); err == nil {
+		t.Error("a session with no status was reported as down")
+	}
+}
+
+func TestOneFailingCollectorDoesNotHideTheOthers(t *testing.T) {
+	run := fake(map[string]string{bgpCmd: "@bgp_neighbors.json"}) // no BFD
+	got := series(t, Gather(context.Background(), run, all, discard))
+	expect(t, got, map[string]float64{
+		`frrk8s_scrape_collector_success{collector="bgp"}`: 1,
+		`frrk8s_scrape_collector_success{collector="bfd"}`: 0,
+	})
+	for _, c := range all {
+		if _, ok := got[fmt.Sprintf(`frrk8s_scrape_collector_duration_seconds{collector=%q}`, c.Name)]; !ok {
+			t.Errorf("no duration for %s", c.Name)
+		}
+	}
+	absent(t, got, "frrk8s_bfd_")
+}
+
+func TestSelectCollectors(t *testing.T) {
+	cs, err := Select("bgp, bfd")
+	if err != nil || len(cs) != 2 || cs[1].Name != "bfd" {
+		t.Errorf("got %v, %v", cs, err)
+	}
+	for _, bad := range []string{"bgp,ospf", "", "bgp,bgp", "bgp,,bfd"} {
+		if _, err := Select(bad); err == nil {
+			t.Errorf("Select(%q) accepted", bad)
+		}
+	}
+}
+
+// BenchmarkCollectBGP backs the README's scale figure: 2000 neighbors built
+// from the real fixture's shape.
+func BenchmarkCollectBGP(b *testing.B) {
+	raw, err := os.ReadFile("testdata/bgp_neighbors.json")
+	if err != nil {
+		b.Fatal(err)
+	}
+	var fixture map[string]map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		b.Fatal(err)
+	}
+	peers := map[string]json.RawMessage{}
+	for i := 0; i < 2000; i++ {
+		peers[fmt.Sprintf("10.%d.%d.%d", i/65536%256, i/256%256, i%256+1)] = fixture["default"]["10.78.0.3"]
+	}
+	big, _ := json.Marshal(map[string]any{"default": peers})
+	run := func(context.Context, string) ([]byte, error) { return big, nil }
+	b.SetBytes(int64(len(big)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := collectBGP(context.Background(), run); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func TestCanceledCollectorCannotPublishASuccessfulSnapshot(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	c := Collector{Name: "canceled", Collect: func(context.Context, Runner) ([]prometheus.Metric, error) {
+		cancel()
+		return []prometheus.Metric{prometheus.MustNewConstMetric(bgpSessionUp, prometheus.GaugeValue, 1, "peer", "vrf")}, nil
+	}}
+	got := series(t, Gather(ctx, nil, []Collector{c}, discard))
+	expect(t, got, map[string]float64{`frrk8s_scrape_collector_success{collector="canceled"}`: 0})
+	absent(t, got, "frrk8s_bgp_")
+}
+
+func TestCancellationStopsAtEachSuccessfulRead(t *testing.T) {
+	replies := map[string]string{bgpCmd: "@bgp_neighbors.json", peersCmd: "@bfd_peers.json", countersCmd: "@bfd_counters.json"}
+	for _, c := range all {
+		reads := 2
+		if c.Name == "bgp" {
+			reads = 1
+		}
+		for at := 1; at <= reads; at++ {
+			t.Run(fmt.Sprintf("%s/read%d", c.Name, at), func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				calls := 0
+				run := func(ctx context.Context, command string) ([]byte, error) {
+					calls++
+					out, err := fake(replies)(ctx, command)
+					if calls == at {
+						cancel()
+					}
+					return out, err
+				}
+				ms, err := c.Collect(ctx, run)
+				if !errors.Is(err, context.Canceled) || len(ms) != 0 || calls != at {
+					t.Fatalf("canceled after read %d: %d reads, %d metrics, error %v", at, calls, len(ms), err)
+				}
+			})
+		}
+	}
+}
+
+func TestBFDSBFDDoesNotSatisfyOrdinarySessionHealth(t *testing.T) {
+	// This real SBFD-init session is up, but its name/mode cannot be represented
+	// by the ordinary BFD label identity. Reject even without a simultaneous collision.
+	for _, mixed := range []bool{false, true} {
+		replies := map[string]string{peersCmd: "@bfd_sbfd_peers.json", countersCmd: "@bfd_sbfd_counters.json"}
+		if mixed {
+			for command, ordinary := range map[string]string{peersCmd: "@bfd_peers.json", countersCmd: "@bfd_counters.json"} {
+				named, err := fake(replies)(context.Background(), command)
+				if err != nil {
+					t.Fatal(err)
+				}
+				normal, err := fake(map[string]string{command: ordinary})(context.Background(), command)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var a, b []json.RawMessage
+				if err := json.Unmarshal(named, &a); err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal(normal, &b); err != nil {
+					t.Fatal(err)
+				}
+				both, err := json.Marshal(append(b, a...))
+				if err != nil {
+					t.Fatal(err)
+				}
+				replies[command] = string(both)
+			}
+		}
+		if ms, err := collectBFD(context.Background(), fake(replies)); err == nil || len(ms) != 0 {
+			t.Errorf("mixed=%v: accepted unsupported mode: %d metrics, error %v", mixed, len(ms), err)
+		}
+		got := series(t, Gather(context.Background(), fake(replies), all[1:2], discard))
+		expect(t, got, map[string]float64{`frrk8s_scrape_collector_success{collector="bfd"}`: 0})
+		absent(t, got, "frrk8s_bfd_")
+	}
+}
+
+func encodeJSON(t *testing.T, value any) string {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
