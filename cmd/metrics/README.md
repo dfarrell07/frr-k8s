@@ -92,3 +92,26 @@ missing CA replacements keep the last good trust and log an error. New
 connections, including resumed TLS sessions, use the new CA; already authenticated
 keep-alive connections retain access. Restart to close existing connections when
 removing trust. This does not implement certificate revocation lists.
+
+## Container checks and downstream builds
+
+Run `bash hack/metrics-smoke.sh` (podman, openssl, curl and Linux 802.3ad bonding).
+`FRR_IMAGE=quay.io/frrouting/frr:10.6.2` selects another FRR release;
+`METRICS_BINARY=/absolute/path` tests an existing static binary, including one
+built downstream, and `SMOKE_DUMP=/path` saves a healthy scrape. Two virtual PEs
+exercise BGP/BFD, L2/L3 VNIs, membership, local ES/DF transitions, VNI deletion,
+concurrent scrapers, required client certificates, daemon hangs/recovery and
+SIGTERM during a hung read. These are local control-plane and process checks.
+
+`openshift/frr` builds `cmd/metrics` with its own `go.mod`, vendor tree and
+`Dockerfile.openshift` RHEL Go builder. To check a backport, apply `cmd/metrics`,
+the `internal/tlsconfig` change and `hack/metrics-smoke.sh` there, then run `go test -mod=vendor
+./cmd/metrics/... ./internal/tlsconfig/...` and `CGO_ENABLED=0 go build -mod=vendor
+-o /tmp/frr-metrics ./cmd/metrics`. Test that binary with the smoke script before
+building `podman build -f Dockerfile.openshift .`. Upstream's Dockerfile must
+build the package too, so adjacent serving files are included.
+
+Host Go 1.26 with the downstream vendor tree can check source compatibility;
+only the actual RHEL image build establishes that build path. Appliance lifecycle,
+SELinux, FIPS validation, declared scale, forwarding and shared-CE HA still need
+qualification on the selected production image and platform.

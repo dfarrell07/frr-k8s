@@ -445,6 +445,8 @@ curl -k https://127.0.0.1:9141/metrics
 
 Anything that can reach the listener can then read the metrics. The default bind address `0.0.0.0` covers both IPv4 and IPv6, so bind to loopback or a management address and restrict access with a firewall.
 
+See [FRR metrics](cmd/metrics/README.md) for standalone client-certificate authentication, optional EVPN collectors and collection failure semantics.
+
 ## License
 
 Copyright 2023.
