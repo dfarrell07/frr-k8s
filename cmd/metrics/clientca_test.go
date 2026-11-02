@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -18,6 +19,7 @@ import (
 	"net/http/httptrace"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -343,29 +345,32 @@ func TestClientCABundleRejectsEveryDamagedBlock(t *testing.T) {
 		"PEM headers":   string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Headers: map[string]string{"Unexpected": "header"}, Bytes: p.ca.Raw})),
 	}
 	for name, bad := range damaged {
-		for position, bundle := range map[string]string{"prefix": bad + first, "middle": first + bad + second, "trailer": first + bad} {
-			t.Run(name+"/"+position, func(t *testing.T) {
-				file := filepath.Join(t.TempDir(), "ca.crt")
-				write(t, file, []byte(first+second))
-				ca := &clientCA{base: &tls.Config{MinVersion: tls.VersionTLS13}, file: file, logger: discard}
-				good, err := ca.get(nil)
-				if err != nil {
-					t.Fatal(err)
-				}
-				write(t, file, []byte(bundle))
-				got, err := ca.get(nil)
-				if err != nil || got != good || ca.lastErr == "" || got.ClientAuth != tls.RequireAndVerifyClientCert {
-					t.Fatalf("partly damaged bundle replaced last-good trust: %v", err)
-				}
-				if _, err := withClientCA(ca.base, file, discard); err == nil {
-					t.Fatal("partly damaged initial bundle was accepted")
-				}
-				write(t, file, q.pem)
-				got, err = ca.get(nil)
-				if err != nil || got == good || ca.lastErr != "" {
-					t.Fatalf("valid replacement did not recover: %v", err)
-				}
-			})
+		for position, original := range map[string]string{"prefix": bad + first, "middle": first + bad + second, "trailer": first + bad} {
+			for _, ending := range []struct{ name, value string }{{"LF", "\n"}, {"CRLF", "\r\n"}} {
+				bundle := strings.ReplaceAll(original, "\n", ending.value)
+				t.Run(name+"/"+position+"/"+ending.name, func(t *testing.T) {
+					file := filepath.Join(t.TempDir(), "ca.crt")
+					write(t, file, []byte(first+second))
+					ca := &clientCA{base: &tls.Config{MinVersion: tls.VersionTLS13}, file: file, logger: discard}
+					good, err := ca.get(nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					write(t, file, []byte(bundle))
+					got, err := ca.get(nil)
+					if err != nil || got != good || ca.lastErr == "" || got.ClientAuth != tls.RequireAndVerifyClientCert {
+						t.Fatalf("partly damaged bundle replaced last-good trust: %v", err)
+					}
+					if _, err := withClientCA(ca.base, file, discard); err == nil {
+						t.Fatal("partly damaged initial bundle was accepted")
+					}
+					write(t, file, q.pem)
+					got, err = ca.get(nil)
+					if err != nil || got == good || ca.lastErr != "" {
+						t.Fatalf("valid replacement did not recover: %v", err)
+					}
+				})
+			}
 		}
 	}
 }
@@ -382,5 +387,28 @@ func TestClientCABundleAcceptsAllRootsAndComments(t *testing.T) {
 	want.AddCert(q.ca)
 	if !got.Equal(want) {
 		t.Fatal("valid bundle did not retain both roots")
+	}
+}
+
+func TestClientCABundleLineEndings(t *testing.T) {
+	p, q := newPKI(t), newPKI(t)
+	for _, ending := range []struct{ name, value string }{{"LF", "\n"}, {"CRLF", "\r\n"}} {
+		for _, roots := range [][]*pki{{p}, {p, q}} {
+			t.Run(fmt.Sprintf("%s/%d_roots", ending.name, len(roots)), func(t *testing.T) {
+				var bundle []byte
+				want := x509.NewCertPool()
+				for _, root := range roots {
+					bundle = append(bundle, bytes.ReplaceAll(root.pem, []byte("\n"), []byte(ending.value))...)
+					want.AddCert(root.ca)
+				}
+				got, err := clientCAPool(bundle)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !got.Equal(want) {
+					t.Fatal("bundle did not retain all roots")
+				}
+			})
+		}
 	}
 }

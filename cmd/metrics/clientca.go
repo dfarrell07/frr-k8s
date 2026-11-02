@@ -96,7 +96,7 @@ func clientCAPool(data []byte) (*x509.CertPool, error) {
 		}
 		chunk := data
 		if next := bytes.Index(data[1:], []byte("\n-----BEGIN ")); next >= 0 {
-			chunk = data[:next+1]
+			chunk = data[:next+2] // Keep the LF terminating a CRLF PEM END line.
 		}
 		block, rest := pem.Decode(chunk)
 		if block == nil || block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
