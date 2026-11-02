@@ -64,7 +64,7 @@ func main() {
 		os.Exit(1)
 	}
 	mux.Handle(*metricsPath, metricsHandler)
-	mux.Handle("/livez", liveness.Handler(vtysh.Run, logger))
+	mux.Handle("/livez", liveness.Handler((vtysh.Vtysh{}).Run, logger))
 
 	tlsOpt, err := tlsconfig.OptFor(*tlsCipherSuites, *tlsCurvePreferences, *tlsMinVersionFlag)
 	if err != nil {
