@@ -117,10 +117,14 @@ func newMetricsHandler(disableAuth bool) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return filter(ctrl.Log.WithName("metrics-auth"), handler)
+	handler.authenticated, err = filter(ctrl.Log.WithName("metrics-auth"), http.HandlerFunc(handler.serveMetrics))
+	if err != nil {
+		return nil, err
+	}
+	return handler, nil
 }
 
-func promHandler() (http.Handler, error) {
+func promHandler() (*exporter, error) {
 	cs, err := collector.Select(*collectorNames)
 	if err != nil {
 		return nil, err

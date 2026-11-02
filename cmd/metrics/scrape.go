@@ -25,16 +25,17 @@ const (
 
 // exporter bounds FRR reads and response work separately. Read slots are free
 // while other clients receive their responses; a second limit bounds retained
-// snapshots and writers. Requests beyond either budget get 503.
+// authentication, snapshots and writers. Excess requests get 503.
 type exporter struct {
-	run         collector.Runner
-	cs          []collector.Collector
-	timeout     time.Duration // upper bound; the scraper's own timeout can lower it
-	base        prometheus.Gatherer
-	httpMetrics *prometheus.Registry
-	sem         chan struct{}
-	responses   chan struct{} // retained snapshots and active response writers
-	logger      log.Logger
+	run           collector.Runner
+	cs            []collector.Collector
+	timeout       time.Duration // upper bound; the scraper's own timeout can lower it
+	base          prometheus.Gatherer
+	httpMetrics   *prometheus.Registry
+	sem           chan struct{}
+	responses     chan struct{} // admitted requests, including authorization and writers
+	logger        log.Logger
+	authenticated http.Handler // Kubernetes filter around serveMetrics, when enabled
 }
 
 func (e *exporter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -45,6 +46,17 @@ func (e *exporter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "too many concurrent responses", http.StatusServiceUnavailable)
 		return
 	}
+	ctx, cancel := context.WithTimeout(r.Context(), e.deadline(r))
+	defer cancel()
+	r = r.WithContext(ctx)
+	if e.authenticated != nil {
+		e.authenticated.ServeHTTP(w, r)
+		return
+	}
+	e.serveMetrics(w, r)
+}
+
+func (e *exporter) serveMetrics(w http.ResponseWriter, r *http.Request) {
 	ms, ok := e.scrape(r)
 	if !ok {
 		http.Error(w, "too many concurrent scrapes", http.StatusServiceUnavailable)
@@ -68,9 +80,7 @@ func (e *exporter) scrape(r *http.Request) ([]prometheus.Metric, bool) {
 	default:
 		return nil, false
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), e.deadline(r))
-	defer cancel()
-	return collector.Gather(ctx, e.run, e.cs, e.logger), true
+	return collector.Gather(r.Context(), e.run, e.cs, e.logger), true
 }
 
 // deadline is the configured timeout, lowered to 90% of the scraper's own when
