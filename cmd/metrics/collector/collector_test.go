@@ -224,6 +224,9 @@ func TestMalformedReadsEmitNothing(t *testing.T) {
 		"evpn empty vni":    {all[2], map[string]string{"show evpn vni json": `{"not-a-vni":{}}`}},
 		"evpn wrong shape":  {all[2], map[string]string{"show evpn vni json": "[1]"}},
 	} {
+		if tc.c.Name == "evpn" {
+			tc.replies[esCmd] = "@evpn_es_empty.json"
+		}
 		ms := Gather(context.Background(), fake(tc.replies), []Collector{tc.c}, discard)
 		got := series(t, ms)
 		key := fmt.Sprintf(`frrk8s_scrape_collector_success{collector=%q}`, tc.c.Name)
@@ -276,7 +279,7 @@ func TestCorruptFixtureFieldsFailOnlyTheirCollector(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			replies := map[string]string{bgpCmd: "@bgp_neighbors.json", peersCmd: "@bfd_peers.json",
-				countersCmd: "@bfd_counters.json", evpnCmd: "@evpn_vni.json"}
+				countersCmd: "@bfd_counters.json", evpnCmd: "@evpn_vni.json", esCmd: "@evpn_es_empty.json"}
 			raw, err := fake(replies)(context.Background(), tc.command)
 			if err != nil {
 				t.Fatal(err)
@@ -449,7 +452,7 @@ func TestBFDSessionWithoutStatusIsMalformed(t *testing.T) {
 }
 
 func TestOneFailingCollectorDoesNotHideTheOthers(t *testing.T) {
-	run := fake(map[string]string{bgpCmd: "@bgp_neighbors.json", "show evpn vni json": "@evpn_vni.json"}) // no BFD
+	run := fake(map[string]string{bgpCmd: "@bgp_neighbors.json", "show evpn vni json": "@evpn_vni.json", esCmd: "@evpn_es_empty.json"}) // no BFD
 	got := series(t, Gather(context.Background(), run, all, discard))
 	expect(t, got, map[string]float64{
 		`frrk8s_scrape_collector_success{collector="bgp"}`:  1,
@@ -514,10 +517,10 @@ func TestCanceledCollectorCannotPublishASuccessfulSnapshot(t *testing.T) {
 }
 
 func TestCancellationStopsAtEachSuccessfulRead(t *testing.T) {
-	replies := map[string]string{bgpCmd: "@bgp_neighbors.json", peersCmd: "@bfd_peers.json", countersCmd: "@bfd_counters.json", vniCmd: "@evpn_vni.json"}
+	replies := map[string]string{bgpCmd: "@bgp_neighbors.json", peersCmd: "@bfd_peers.json", countersCmd: "@bfd_counters.json", vniCmd: "@evpn_vni.json", esCmd: "@evpn_es_df.json"}
 	for _, c := range all {
 		reads := 2
-		if c.Name == "bgp" || c.Name == "evpn" {
+		if c.Name == "bgp" {
 			reads = 1
 		}
 		for at := 1; at <= reads; at++ {
