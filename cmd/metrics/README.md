@@ -90,7 +90,9 @@ available for loopback/proxy deployments.
 Existing TLS cipher, curve and minimum-version flags still apply (TLS 1.3 by
 default). The existing certificate watcher reloads the server key pair; client
 trust is re-read at TLS handshakes at most once a second. Invalid, empty or
-missing CA replacements keep the last good trust and log an error. New
+missing CA replacements keep the last good trust and log an error. Every PEM
+block must be a valid certificate; a partly damaged bundle is rejected as a
+whole. Whitespace and `#` comments may separate certificates. New
 connections, including resumed TLS sessions, use the new CA; already authenticated
 keep-alive connections retain access. Restart to close existing connections when
 removing trust. This does not implement certificate revocation lists.

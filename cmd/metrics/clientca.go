@@ -3,9 +3,11 @@
 package main
 
 import (
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
-	"fmt"
+	"encoding/pem"
+	"errors"
 	"os"
 	"sync"
 	"time"
@@ -38,10 +40,9 @@ func (c *clientCA) get(*tls.ClientHelloInfo) (*tls.Config, error) {
 	c.checked = time.Now()
 	data, err := os.ReadFile(c.file)
 	if err == nil && (c.current == nil || string(data) != c.contents) {
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(data) {
-			err = fmt.Errorf("no certificates in client CA file %s", c.file)
-		} else {
+		var pool *x509.CertPool
+		pool, err = clientCAPool(data)
+		if err == nil {
 			cfg := c.base.Clone()
 			cfg.GetConfigForClient = nil
 			cfg.ClientAuth = tls.RequireAndVerifyClientCert
@@ -72,4 +73,45 @@ func withClientCA(base *tls.Config, file string, logger log.Logger) (*tls.Config
 	cfg := base.Clone()
 	cfg.GetConfigForClient = ca.get
 	return cfg, nil
+}
+
+// clientCAPool requires every certificate PEM block to parse. Whitespace and
+// # comments may separate certificates.
+// Decode normally skips damaged blocks. Bound it at the next BEGIN line so every
+// block in a rotation must parse before any part of the new bundle is trusted.
+func clientCAPool(data []byte) (*x509.CertPool, error) {
+	pool := x509.NewCertPool()
+	found := false
+	for {
+		data = bytes.TrimSpace(data)
+		if len(data) == 0 {
+			break
+		}
+		if data[0] == '#' {
+			_, data, _ = bytes.Cut(data, []byte("\n"))
+			continue
+		}
+		if !bytes.HasPrefix(data, []byte("-----BEGIN ")) {
+			return nil, errors.New("invalid data in certificate PEM")
+		}
+		chunk := data
+		if next := bytes.Index(data[1:], []byte("\n-----BEGIN ")); next >= 0 {
+			chunk = data[:next+1]
+		}
+		block, rest := pem.Decode(chunk)
+		if block == nil || block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
+			return nil, errors.New("invalid certificate PEM block")
+		}
+		cert, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, err
+		}
+		pool.AddCert(cert)
+		found = true
+		data = data[len(chunk)-len(rest):]
+	}
+	if !found {
+		return nil, errors.New("no certificates in PEM")
+	}
+	return pool, nil
 }

@@ -330,3 +330,57 @@ func TestClientCARejectsInvalidInitialTrustAndKeepsLastGoodTrust(t *testing.T) {
 		t.Fatal("valid CA did not recover")
 	}
 }
+
+func TestClientCABundleRejectsEveryDamagedBlock(t *testing.T) {
+	p, q := newPKI(t), newPKI(t)
+	first, second := string(p.pem), string(q.pem)
+	damaged := map[string]string{
+		"garbage":       "garbage\n",
+		"malformed PEM": "-----BEGIN CERTIFICATE-----\n!invalid-base64!\n-----END CERTIFICATE-----\n",
+		"truncated PEM": "-----BEGIN CERTIFICATE-----\nMIIB\n",
+		"invalid DER":   string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("invalid DER")})),
+		"foreign block": string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("not a certificate")})),
+		"PEM headers":   string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Headers: map[string]string{"Unexpected": "header"}, Bytes: p.ca.Raw})),
+	}
+	for name, bad := range damaged {
+		for position, bundle := range map[string]string{"prefix": bad + first, "middle": first + bad + second, "trailer": first + bad} {
+			t.Run(name+"/"+position, func(t *testing.T) {
+				file := filepath.Join(t.TempDir(), "ca.crt")
+				write(t, file, []byte(first+second))
+				ca := &clientCA{base: &tls.Config{MinVersion: tls.VersionTLS13}, file: file, logger: discard}
+				good, err := ca.get(nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				write(t, file, []byte(bundle))
+				got, err := ca.get(nil)
+				if err != nil || got != good || ca.lastErr == "" || got.ClientAuth != tls.RequireAndVerifyClientCert {
+					t.Fatalf("partly damaged bundle replaced last-good trust: %v", err)
+				}
+				if _, err := withClientCA(ca.base, file, discard); err == nil {
+					t.Fatal("partly damaged initial bundle was accepted")
+				}
+				write(t, file, q.pem)
+				got, err = ca.get(nil)
+				if err != nil || got == good || ca.lastErr != "" {
+					t.Fatalf("valid replacement did not recover: %v", err)
+				}
+			})
+		}
+	}
+}
+
+func TestClientCABundleAcceptsAllRootsAndComments(t *testing.T) {
+	p, q := newPKI(t), newPKI(t)
+	bundle := " \n# first root\n\t" + string(p.pem) + "\n \t# second root, literal -----BEGIN CERTIFICATE-----\n" + string(q.pem) + "\n# end without newline"
+	got, err := clientCAPool([]byte(bundle))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := x509.NewCertPool()
+	want.AddCert(p.ca)
+	want.AddCert(q.ca)
+	if !got.Equal(want) {
+		t.Fatal("valid bundle did not retain both roots")
+	}
+}
