@@ -19,6 +19,7 @@ import (
 	"go.universe.tf/e2etest/pkg/container"
 	"go.universe.tf/e2etest/pkg/executor"
 	"go.universe.tf/e2etest/pkg/frr"
+	"go.universe.tf/e2etest/pkg/metrics"
 	"go.universe.tf/e2etest/pkg/netdev"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -134,6 +135,14 @@ var _ = ginkgo.Describe("Unnumbered", func() {
 
 		ginkgo.By("validating the node and p2p container peered")
 		validateUnnumberedBGPPeering(externalP2PContainer, nodeLLA)
+
+		ginkgo.By("validating unnumbered BFD metric identities")
+		promPod, err := metrics.PrometheusPod(cs, PrometheusNamespace)
+		Expect(err).NotTo(HaveOccurred())
+		pod, err := k8s.FRRK8sPodOnNode(cs, nodeWithP2PConnection.Name)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(pod).NotTo(BeNil())
+		ValidatePodUnnumberedBFDMetrics(pod, promPod, peerLLA, nodeLLA, iface)
 
 		ginkgo.By(fmt.Sprintf("validating the p2p peer %s received the routes from node", externalP2PContainer.Name))
 		validatePrefixViaFor(externalP2PContainer, iface, nodeLLA, prefixSend)
