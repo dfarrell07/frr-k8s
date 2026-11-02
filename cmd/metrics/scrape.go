@@ -35,6 +35,7 @@ type exporter struct {
 	sem           chan struct{}
 	responses     chan struct{} // admitted requests, including authorization and writers
 	logger        log.Logger
+	closeAuth     func()       // stop and drain Kubernetes review calls after serving
 	authenticated http.Handler // Kubernetes filter around serveMetrics, when enabled
 }
 

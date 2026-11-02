@@ -10,13 +10,12 @@ import (
 	"net/http"
 	"strings"
 	"sync/atomic"
-
-	"github.com/metallb/frr-k8s/cmd/metrics/collector"
-	"github.com/prometheus/client_golang/prometheus"
 	"testing"
 	"time"
 
+	"github.com/metallb/frr-k8s/cmd/metrics/collector"
 	"github.com/metallb/frr-k8s/internal/tlsconfig"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 func startServer(t *testing.T, handler http.Handler, grace time.Duration) (string, context.CancelFunc, <-chan error) {

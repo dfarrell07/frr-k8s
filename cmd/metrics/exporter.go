@@ -99,13 +99,17 @@ func main() {
 
 	level.Info(logger).Log("msg", "Starting exporter", "metricsPath", *metricsPath, "port", *metricsPort, "metricsAuthDisabled", *disableMetricsAuth)
 
-	if err := serve(ctx, srv, 5*time.Second); err != nil {
+	err = serve(ctx, srv, 5*time.Second)
+	if metricsHandler.closeAuth != nil {
+		metricsHandler.closeAuth()
+	}
+	if err != nil {
 		level.Error(logger).Log("error", err)
 		os.Exit(1)
 	}
 }
 
-func newMetricsHandler(disableAuth bool) (http.Handler, error) {
+func newMetricsHandler(disableAuth bool) (*exporter, error) {
 	handler, err := promHandler()
 	if err != nil {
 		return nil, err
@@ -113,12 +117,14 @@ func newMetricsHandler(disableAuth bool) (http.Handler, error) {
 	if disableAuth {
 		return handler, nil
 	}
-	filter, err := rbacFilter()
+	filter, closeAuth, err := rbacFilter()
 	if err != nil {
 		return nil, err
 	}
+	handler.closeAuth = closeAuth
 	handler.authenticated, err = filter(ctrl.Log.WithName("metrics-auth"), http.HandlerFunc(handler.serveMetrics))
 	if err != nil {
+		closeAuth()
 		return nil, err
 	}
 	return handler, nil
@@ -136,16 +142,21 @@ func promHandler() (*exporter, error) {
 		base: prometheus.DefaultGatherer, httpMetrics: prometheus.NewRegistry(), sem: make(chan struct{}, maxScrapes), responses: make(chan struct{}, maxResponses), logger: logging.GetLogger()}, nil
 }
 
-func rbacFilter() (metricsserver.Filter, error) {
+func rbacFilter() (metricsserver.Filter, func(), error) {
 	config, err := rest.InClusterConfig()
 	if err != nil {
-		return nil, fmt.Errorf("getting in-cluster config: %w", err)
+		return nil, nil, fmt.Errorf("getting in-cluster config: %w", err)
 	}
-	httpClient, err := rest.HTTPClientFor(config)
+	config, httpClient, closeAuth, err := newReviewClient(config)
 	if err != nil {
-		return nil, fmt.Errorf("creating HTTP client: %w", err)
+		return nil, nil, fmt.Errorf("creating HTTP client: %w", err)
 	}
-	return filters.WithAuthenticationAndAuthorization(config, httpClient)
+	filter, err := filters.WithAuthenticationAndAuthorization(config, httpClient)
+	if err != nil {
+		closeAuth()
+		return nil, nil, err
+	}
+	return filter, closeAuth, nil
 }
 
 // validateAccess keeps Kubernetes authentication as the default; standalone

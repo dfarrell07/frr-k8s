@@ -36,17 +36,25 @@ BGP `_total` gauges still sum reported families. Alert on collector success and
 absent expected series as well as `up`: FRR failure can return HTTP 200 with
 collector success 0. Inconsistent output such as duplicate series returns 500.
 
-All collectors run concurrently under one `--scrape-timeout` (default 8s),
-lowered to 90% of Prometheus's announced timeout. Each CLI command connects only
-to its owning daemon and stdout is limited to 32 MiB; stderr only adds error
-context. Four scrapes may read FRR concurrently and eight responses may gather
-or write; excess requests return 503 before reading FRR. A slow reader releases
-its collection slot before writing. Read/write deadlines bound clients; the
-liveness probe has a separate single slot and three-second deadline.
+Admitted handlers and concurrent collection share one `--scrape-timeout`
+(default 8s), lowered to 90% of Prometheus's announced timeout. Each CLI command
+connects only to its owning daemon and stdout is limited to 32 MiB; stderr only
+adds error context. Eight requests may authenticate, gather or write; excess
+requests return 503 before calling Kubernetes or FRR. Four scrapes may read FRR
+concurrently; excess authenticated requests return 503 before reading FRR. A
+slow reader releases its collection slot before writing. Read/write deadlines
+bound clients; the liveness probe has a separate single slot and three-second
+deadline.
+
+Kubernetes's token cache may finish a lookup after its requesting handler times
+out, using its existing ten-second API timeout. Eight Kubernetes API calls may
+be active, including response bodies. Each review API retains client-go's
+QPS/burst limits; overload fails instead of queuing detached lookups.
 
 SIGINT/SIGTERM stops admission and drains requests for five seconds, then
 cancels reads, closes connections and waits for handlers and their vtysh
-processes to finish. `/livez` retains the existing daemon-inventory check;
+processes to finish, then cancels and drains remaining Kubernetes API calls.
+`/livez` retains the existing daemon-inventory check;
 it does not establish routing or forwarding health.
 
 VNI inventory, occupancy and remote VTEP membership are observations, not
@@ -102,7 +110,9 @@ removing trust. This does not implement certificate revocation lists.
 Run `bash hack/metrics-smoke.sh` (podman, openssl, curl and Linux 802.3ad bonding).
 `FRR_IMAGE=quay.io/frrouting/frr:10.6.2` selects another FRR release;
 `METRICS_BINARY=/absolute/path` tests an existing static binary, including one
-built downstream, and `SMOKE_DUMP=/path` saves a healthy scrape. Two virtual PEs
+built downstream, and `SMOKE_DUMP=/path` saves a healthy scrape. To exercise an
+image's packaged exporter, set `FRR_IMAGE=... METRICS_IMAGE_BINARY=/frr-metrics`
+and omit `METRICS_BINARY`; no host binary is mounted. Two virtual PEs
 exercise BGP/BFD, L2/L3 VNIs, membership, local ES/DF transitions, VNI deletion,
 concurrent scrapers, required client certificates, daemon hangs/recovery and
 SIGTERM during a hung read. These are local control-plane and process checks.
