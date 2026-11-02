@@ -26,7 +26,7 @@ func TestStandaloneDoesNotChangeKubernetesDefault(t *testing.T) {
 	if err := logging.Init(); err != nil {
 		t.Fatal(err)
 	}
-	if *disableMetricsAuth || *collectorNames != "bgp,bfd" {
+	if *disableMetricsAuth || *tlsClientCAFile != "" || *collectorNames != "bgp,bfd" {
 		t.Fatal("deployment defaults changed")
 	}
 	t.Setenv("KUBERNETES_SERVICE_HOST", "")
@@ -36,6 +36,18 @@ func TestStandaloneDoesNotChangeKubernetesDefault(t *testing.T) {
 	}
 	if _, err := newMetricsHandler(true); err != nil {
 		t.Fatalf("standalone unexpectedly needs Kubernetes: %v", err)
+	}
+	for _, tc := range []struct {
+		disabled      bool
+		ca, cert, key string
+		valid         bool
+	}{
+		{false, "", "", "", true}, {true, "", "", "", true}, {true, "ca", "cert", "key", true},
+		{false, "ca", "cert", "key", false}, {true, "ca", "", "", false},
+	} {
+		if err := validateAccess(tc.disabled, tc.ca, tc.cert, tc.key); (err == nil) != tc.valid {
+			t.Errorf("%+v: %v", tc, err)
+		}
 	}
 }
 
