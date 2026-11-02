@@ -4,6 +4,8 @@ package tests
 
 import (
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +23,7 @@ import (
 	frrconfig "go.universe.tf/e2etest/pkg/frr/config"
 	frrcontainer "go.universe.tf/e2etest/pkg/frr/container"
 	"go.universe.tf/e2etest/pkg/ipfamily"
+	"go.universe.tf/e2etest/pkg/metrics"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
@@ -149,6 +152,64 @@ var _ = ginkgo.Describe("EVPN sessions", func() {
 				return neighbors
 			}
 
+			validateEVPNMetrics := func(pods []*corev1.Pod) {
+				ginkgo.GinkgoHelper()
+				ginkgo.By("Validating authenticated EVPN metrics on frr-k8s pods")
+				promPod, err := metrics.PrometheusPod(cs, PrometheusNamespace)
+				Expect(err).NotTo(HaveOccurred())
+
+				vni, vniType, vrf := evpnCfg.L2VNI, "L2", "default"
+				if evpnCfg.L3VNI != 0 {
+					vni, vniType, vrf = evpnCfg.L3VNI, "L3", evpnCfg.L3VRF
+				}
+				vniLabel := strconv.FormatUint(uint64(vni), 10)
+				for _, pod := range pods {
+					Eventually(func() error {
+						podMetrics, err := forPod(promPod, pod)
+						if err != nil {
+							return err
+						}
+						for _, collector := range []string{"bgp", "evpn"} {
+							if err := metrics.ValidateGaugeValue(1, "frrk8s_scrape_collector_success", map[string]string{"collector": collector}, podMetrics); err != nil {
+								return err
+							}
+						}
+						for _, peerIP := range evpnFRRContainer.AddressesForFamily(peerFamily) {
+							labels := map[string]string{"peer": peerIP, "vrf": "default", "afi": "l2vpn", "safi": "evpn"}
+							for _, metric := range []string{"frrk8s_bgp_family_announced_prefixes", "frrk8s_bgp_family_received_prefixes"} {
+								if err := metrics.ValidateGaugeValueCompare(metrics.GreaterOrEqualThan(1), metric, labels, podMetrics); err != nil {
+									return fmt.Errorf("EVPN prefixes for peer %s: %w", peerIP, err)
+								}
+							}
+							// The default VRF exchanges EVPN routes, while its unicast
+							// family receives none, even when type-5 routes carry IP prefixes.
+							labels["afi"], labels["safi"] = ipfamily.ForAddress(net.ParseIP(peerIP)).String(), "unicast"
+							if err := metrics.ValidateGaugeValue(0, "frrk8s_bgp_family_received_prefixes", labels, podMetrics); err != nil {
+								return fmt.Errorf("unicast prefixes for peer %s: %w", peerIP, err)
+							}
+						}
+						if err := metrics.ValidateGaugeValue(1, "frrk8s_evpn_vni_info", map[string]string{
+							"vni": vniLabel, "vrf": vrf, "type": vniType, "interface": evpnCfg.Vxlan,
+						}, podMetrics); err != nil {
+							return err
+						}
+						if vniType == "L2" {
+							// The external FRR is the sole remote VTEP: these iBGP
+							// sessions do not reflect routes between cluster nodes.
+							labels := map[string]string{"vni": vniLabel, "vrf": vrf}
+							if err := metrics.ValidateGaugeValue(1, "frrk8s_evpn_remote_vteps", labels, podMetrics); err != nil {
+								return err
+							}
+							labels["vtep"] = evpnFRRContainer.Ipv4
+							if err := metrics.ValidateGaugeValue(1, "frrk8s_evpn_remote_vtep_present", labels, podMetrics); err != nil {
+								return err
+							}
+						}
+						return nil
+					}, 30*time.Second, time.Second).ShouldNot(HaveOccurred(), "EVPN metrics not found on pod %s", pod.Name)
+				}
+			}
+
 			// validateL2VNI validates L2 VNI EVPN state: sessions, VNI visibility,
 			// type-2 routes, and data path connectivity.
 			validateL2VNI := func() {
@@ -201,6 +262,7 @@ var _ = ginkgo.Describe("EVPN sessions", func() {
 					}, 30*time.Second, time.Second).ShouldNot(HaveOccurred(),
 						"ping from external FRR to node %s (%s) failed", node, targetIP)
 				}
+				validateEVPNMetrics(pods)
 			}
 
 			// validateL3VNI validates L3 VNI EVPN state: sessions, type-5 routes,
@@ -249,6 +311,7 @@ var _ = ginkgo.Describe("EVPN sessions", func() {
 					}, 30*time.Second, time.Second).ShouldNot(HaveOccurred(),
 						"ping from external FRR to node %s (%s) via VRF %s failed", node, targetIP, evpnCfg.L3VRF)
 				}
+				validateEVPNMetrics(pods)
 			}
 
 			ginkgo.Context("with L2 VNI in use", func() {

@@ -3,9 +3,13 @@
 package e2e
 
 import (
+	"context"
 	"flag"
+	"fmt"
 	"os"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/metallb/frrk8stests/pkg/dump"
 	"github.com/metallb/frrk8stests/pkg/infra"
@@ -16,6 +20,8 @@ import (
 	"github.com/onsi/gomega"
 	. "github.com/onsi/gomega"
 	"go.universe.tf/e2etest/pkg/executor"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
@@ -71,7 +77,52 @@ func TestE2E(t *testing.T) {
 var _ = ginkgo.BeforeSuite(func() {
 	log.SetLogger(zap.New(zap.WriteTo(ginkgo.GinkgoWriter), zap.UseDevMode(true)))
 	cs := k8sclient.New()
-	var err error
+
+	ginkgo.By("Enabling EVPN metrics in the test deployment")
+	daemonSet, err := k8s.FRRK8sDaemonSet(cs)
+	Expect(err).NotTo(HaveOccurred())
+	daemonSets := cs.AppsV1().DaemonSets(daemonSet.Namespace)
+	var generation int64
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current, err := daemonSets.Get(context.Background(), daemonSet.Name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		for i := range current.Spec.Template.Spec.Containers {
+			container := &current.Spec.Template.Spec.Containers[i]
+			if container.Name != "frr-metrics" {
+				continue
+			}
+			// A final scalar flag overrides earlier values without changing auth,
+			// TLS or port arguments. Both shipped test deployments omit it.
+			const collectors = "--collectors=bgp,bfd,evpn"
+			if !slices.Contains(container.Args, collectors) {
+				container.Args = append(container.Args, collectors)
+				current, err = daemonSets.Update(context.Background(), current, metav1.UpdateOptions{})
+				if err != nil {
+					return err
+				}
+			}
+			generation = current.Generation
+			return nil
+		}
+		return fmt.Errorf("daemonset %s has no frr-metrics container", current.Name)
+	})
+	Expect(err).NotTo(HaveOccurred())
+	Eventually(func() error {
+		current, err := daemonSets.Get(context.Background(), daemonSet.Name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		status := current.Status
+		if status.ObservedGeneration < generation || status.DesiredNumberScheduled == 0 ||
+			status.UpdatedNumberScheduled != status.DesiredNumberScheduled ||
+			status.NumberAvailable != status.DesiredNumberScheduled {
+			return fmt.Errorf("waiting for frr-metrics rollout at generation %d: %+v", generation, status)
+		}
+		return nil
+	}, 3*time.Minute, time.Second).ShouldNot(HaveOccurred())
+
 	switch {
 	case externalContainers != "":
 		infra.FRRContainers, err = infra.ExternalContainersSetup(externalContainers, cs)
