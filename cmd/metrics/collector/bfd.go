@@ -11,9 +11,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// BFD keeps peer/VRF output labels while correlating full internal identities.
+// BFD series keep frr-k8s's names and add the rest of FRR's session identity
+// (local address, interface, single or multihop), so two sessions to one peer
+// never collide. The peer and vrf labels keep their meaning, except that for an unnumbered
+// BGP peer the BGP series carry the interface name as peer and these carry the
+// address, with the interface in its own label.
 var (
-	bfdLabels = []string{"peer", "vrf"}
+	bfdLabels = []string{"peer", "vrf", "local", "interface", "multihop"}
 
 	bfdSessionUp = desc("bfd_session_up", "BFD session state (1 is up, 0 is down)", bfdLabels...)
 	bfdCounters  = []struct {
@@ -113,7 +117,6 @@ func collectBFD(ctx context.Context, run Runner) ([]prometheus.Metric, error) {
 		byID[c.ID], keys[c.labels()] = c, true
 	}
 	seen := make(map[[5]string]bool, len(sessions))
-	legacy := make(map[[2]string]bool, len(sessions))
 	var ms []prometheus.Metric
 	for _, s := range sessions {
 		if err := ctx.Err(); err != nil {
@@ -126,11 +129,6 @@ func collectBFD(ctx context.Context, run Runner) ([]prometheus.Metric, error) {
 			return nil, fmt.Errorf("BFD session has no ID, peer, multihop flag or status: %+v", s.bfdKey)
 		}
 		l := s.labels()
-		key := [2]string{l[0], l[1]}
-		if legacy[key] {
-			return nil, fmt.Errorf("BFD sessions share peer/VRF output labels: %v", key)
-		}
-		legacy[key] = true
 		if seen[l] {
 			return nil, fmt.Errorf("two BFD sessions share the identity %+v", s.bfdKey)
 		}
@@ -144,10 +142,10 @@ func collectBFD(ctx context.Context, run Runner) ([]prometheus.Metric, error) {
 		if s.Status == "up" {
 			up = 1
 		}
-		ms = append(ms, prometheus.MustNewConstMetric(bfdSessionUp, prometheus.GaugeValue, up, l[:2]...))
+		ms = append(ms, prometheus.MustNewConstMetric(bfdSessionUp, prometheus.GaugeValue, up, l[:]...))
 		for _, m := range bfdCounters {
 			if v := m.get(c); v != nil {
-				ms = append(ms, prometheus.MustNewConstMetric(m.desc, prometheus.CounterValue, float64(*v), l[:2]...))
+				ms = append(ms, prometheus.MustNewConstMetric(m.desc, prometheus.CounterValue, float64(*v), l[:]...))
 			}
 		}
 	}
