@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.2
 
-FROM --platform=$BUILDPLATFORM docker.io/golang:1.26.8 AS builder
+FROM --platform=$BUILDPLATFORM docker.io/golang:1.27.3 AS builder
 ARG GIT_COMMIT=dev
 ARG GIT_BRANCH=dev
 WORKDIR $GOPATH/frr-k8s
@@ -34,7 +34,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
   CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=$VARIANT \
   go build -v -o /build/frr-metrics \
   -ldflags "-X 'github.com/metallb/frr-k8s/internal/version.gitCommit=${GIT_COMMIT}' -X 'github.com/metallb/frr-k8s/internal/version.gitBranch=${GIT_BRANCH}'" \
-  cmd/metrics/exporter.go \
+  ./cmd/metrics \
   && \
   # build frr status
   CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=$VARIANT \
