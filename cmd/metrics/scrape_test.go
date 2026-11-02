@@ -24,7 +24,7 @@ import (
 var discard = log.NewNopLogger()
 
 var cs = func() []collector.Collector {
-	cs, err := collector.Select("bgp,bfd")
+	cs, err := collector.Select("bgp,bfd,evpn")
 	if err != nil {
 		panic(err)
 	}
@@ -128,7 +128,7 @@ func scrapeBody(t *testing.T, e *exporter, header ...string) (int, string) {
 }
 
 func TestSlowCollectorDoesNotStarveTheOthers(t *testing.T) {
-	// BGP hangs until the deadline; BFD must still get their full time.
+	// BGP hangs until the deadline; BFD and EVPN must still get their full time.
 	run := func(ctx context.Context, command string) ([]byte, error) {
 		if command == bgpCmd {
 			<-ctx.Done()
@@ -137,7 +137,7 @@ func TestSlowCollectorDoesNotStarveTheOthers(t *testing.T) {
 		return quiet(ctx, command)
 	}
 	_, body := scrapeBody(t, newExporter(run, 200*time.Millisecond))
-	for collector, want := range map[string]string{"bgp": "0", "bfd": "1"} {
+	for collector, want := range map[string]string{"bgp": "0", "bfd": "1", "evpn": "1"} {
 		if line := fmt.Sprintf(`frrk8s_scrape_collector_success{collector=%q} %s`, collector, want); !strings.Contains(body, line) {
 			t.Errorf("missing %q", line)
 		}
