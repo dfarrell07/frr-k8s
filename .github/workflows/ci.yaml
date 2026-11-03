@@ -106,6 +106,7 @@ jobs:
       - name: Unit Tests
         run: |
           make test
+          (cd e2etests && go test ./tests -run TestGRCI)
 
   build-test-images:
     runs-on: ubuntu-22.04
@@ -134,57 +135,28 @@ jobs:
           path: /tmp/frrk8s.tar
   build-frr-gr:
     runs-on: ubuntu-22.04
+    permissions:
+      actions: read
     steps:
-      - uses: actions/checkout@v4
-      - name: Checkout corrected FRR
-        uses: actions/checkout@v4
+      # Reuse the immutable image tested by the focused IPv6 run.
+      - uses: actions/download-artifact@v4
         with:
-          repository: dfarrell07/frr
-          ref: 876d8cf0e02b2879bfcb70a9f4fed1bb22750c19
-          path: frr-source
-      - name: Prepare source archive
-        run: |
-          mkdir -p /tmp/frr-build/source
-          git -C frr-source rev-parse HEAD > /tmp/frr-build/source-revision.txt
-          git -C frr-source archive HEAD > /tmp/frr-source.tar
-          sha256sum /tmp/frr-source.tar > /tmp/frr-build/source-archive.sha256
-          tar -xf /tmp/frr-source.tar -C /tmp/frr-build/source
-          cp .github/frr-gr/Dockerfile /tmp/frr-build/Dockerfile
-      - uses: docker/setup-buildx-action@v3
-      - name: Build and test corrected FRR image
-        uses: docker/build-push-action@v5
+          name: image-tar-frr-gr
+          run-id: 41596701508
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: /tmp/frr-image
+      - uses: actions/download-artifact@v4
         with:
-          context: /tmp/frr-build
-          target: runtime
-          tags: localhost/frr-gr-validation:876d8cf0
-          outputs: type=docker,dest=/tmp/frr-gr.tar
-          cache-from: type=gha,scope=frr-gr
-          cache-to: type=gha,mode=max,scope=frr-gr
-      - name: Export native test and build evidence
-        uses: docker/build-push-action@v5
-        with:
-          context: /tmp/frr-build
-          target: evidence
-          outputs: type=local,dest=/tmp/frr-evidence
-          cache-from: type=gha,scope=frr-gr
-      - name: Record runtime payload
-        run: |
-          docker load -i /tmp/frr-gr.tar
-          docker image inspect localhost/frr-gr-validation:876d8cf0 > /tmp/frr-evidence/image.json
-          docker run --rm --entrypoint sh localhost/frr-gr-validation:876d8cf0 -ec '
-            for daemon in bgpd zebra bfdd staticd mgmtd watchfrr; do
-              /usr/lib/frr/$daemon --version
-              ldd /usr/lib/frr/$daemon
-              sha256sum /usr/lib/frr/$daemon
-            done
-          ' > /tmp/frr-evidence/runtime.txt
+          name: frr-gr-build-evidence
+          run-id: 41596701508
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: /tmp/frr-evidence
       - uses: actions/upload-artifact@v4
         with:
           name: image-tar-frr-gr
-          path: /tmp/frr-gr.tar
+          path: /tmp/frr-image/frr-gr.tar
           retention-days: 7
       - uses: actions/upload-artifact@v4
-        if: ${{ always() }}
         with:
           name: frr-gr-build-evidence
           path: /tmp/frr-evidence
@@ -199,8 +171,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ip-family: [ipv6]
-        deployment: [manifests]
+        ip-family: [ipv4, ipv6, dual]
+        deployment: [manifests, helm]
+        exclude:
+        - ip-family: ipv6
+          deployment: helm
+        - ip-family: dual
+          deployment: helm
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -243,7 +220,7 @@ jobs:
           if [ "${{ matrix.ip-family }}" == "dual" ]; then SKIP="$SKIP\|IPV6"; fi
           if [ "${{ matrix.ip-family }}" == "ipv6" ]; then SKIP="$SKIP\|IPV4\|DUALSTACK"; fi
           SKIP="$SKIP\|Leaked.*advertising" # TODO fixed by frr 10.0, remove this when https://github.com/metallb/frr-k8s/issues/165 is fixed
-          GINKGO_ARGS="--focus EnableGracefulRestart --skip $SKIP" TEST_ARGS="--report-path=/tmp/kind_logs --frr-image=quay.io/frrouting/frr@sha256:89e5e1ec8b17c5dffaf57dbac58a29ebeb3731a84e5bc09dad1662adff2ba7f5" make e2etests
+          GINKGO_ARGS="--skip $SKIP" TEST_ARGS="--report-path=/tmp/kind_logs --frr-image=quay.io/frrouting/frr@sha256:89e5e1ec8b17c5dffaf57dbac58a29ebeb3731a84e5bc09dad1662adff2ba7f5" make e2etests
 
       - name: Export kind logs
         if: ${{ always() }}
@@ -257,7 +234,6 @@ jobs:
           artifact-name: kind-logs-${{ matrix.ip-family }}-${{ matrix.deployment }}
 
   metallb_e2e:
-    if: ${{ false }}
     runs-on: ubuntu-22.04
     needs:
       - unit-tests
@@ -301,6 +277,9 @@ jobs:
           --set prometheus.serviceMonitor.metricRelabelings[1].targetLabel=\"__name__\" \
           --set prometheus.serviceMonitor.metricRelabelings[1].replacement=\"metallb_bfd_\\\$\$1\" \
           "
+          KIND_CLUSTER_NAME="kind" NAMESPACE=metallb-system LOGLEVEL=debug IP_FAMILY="ipv4" make deploy-cluster
+          bin/kind load docker-image localhost/frr-gr-validation:876d8cf0 -n kind
+          helm_args="$helm_args --set frrk8s.frr.image.repository=localhost/frr-gr-validation --set frrk8s.frr.image.tag=876d8cf0 --set frrk8s.frr.image.pullPolicy=Never"
           KIND_CLUSTER_NAME="kind" NAMESPACE=metallb-system LOGLEVEL=debug IP_FAMILY="ipv4" HELM_ARGS=${helm_args} make "deploy-helm"
           mkdir -p /tmp/kind_logs/
 
@@ -309,7 +288,7 @@ jobs:
         with:
           repository: metallb/metallb
           path: metallb
-          ref: "main"
+          ref: "6b1047afb2f267d4157c23de14539d02aba13e40"
 
       - name: Deploy MetalLB
         run: |
@@ -348,7 +327,7 @@ jobs:
           cd ${GITHUB_WORKSPACE}/metallb
 
           env "PATH=$PATH" inv remove-lb-exclusion-from-nodes
-          sudo -E env "PATH=$PATH" inv e2etest -b "frr-k8s" --kubeconfig ${KUBECONFIG} --with-vrf --skip "L2|IPV6|DUALSTACK|FRR-MODE" -e /tmp/kind_logs
+          sudo -E env "PATH=$PATH" inv e2etest -b "frr-k8s" --external-frr-image=quay.io/frrouting/frr@sha256:89e5e1ec8b17c5dffaf57dbac58a29ebeb3731a84e5bc09dad1662adff2ba7f5 --kubeconfig ${KUBECONFIG} --with-vrf --skip "L2|IPV6|DUALSTACK|FRR-MODE" -e /tmp/kind_logs
 
       - name: Collect Logs
         if: ${{ always() }}
