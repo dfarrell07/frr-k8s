@@ -3,6 +3,7 @@
 package tests
 
 import (
+	"errors"
 	"fmt"
 	"net/netip"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/openshift-kni/k8sreporter"
 	"go.universe.tf/e2etest/pkg/container"
 	"go.universe.tf/e2etest/pkg/executor"
+	"go.universe.tf/e2etest/pkg/frr"
 
 	frrk8sv1beta1 "github.com/metallb/frr-k8s/api/v1beta1"
 	"github.com/metallb/frrk8stests/pkg/config"
@@ -95,6 +97,14 @@ var _ = ginkgo.Describe("Establish BGP session with EnableGracefulRestart", func
 
 				err := frrcontainer.PairWithNodes(cs, c, ipFam, modify)
 				Expect(err).NotTo(HaveOccurred(), "set frr config in infra containers failed")
+
+				// Helpers must finish startup before the DUT-only restart. Re-arm
+				// their startup timers; the DUT's 120s retention stays unchanged.
+				out, err := c.Exec("vtysh", "-c", "configure terminal",
+					"-c", fmt.Sprintf("router bgp %d", c.RouterConfig.ASN),
+					"-c", "bgp graceful-restart restart-time 1",
+					"-c", "bgp shutdown", "-c", "no bgp shutdown")
+				Expect(err).NotTo(HaveOccurred(), "prepare helper %s: %s", c.Name, out)
 				externalPrefixes = append(externalPrefixes, l)
 			}
 
@@ -121,6 +131,11 @@ var _ = ginkgo.Describe("Establish BGP session with EnableGracefulRestart", func
 
 			err := updater.Update(peersConfig.Secrets, frrConfigCR)
 			Expect(err).NotTo(HaveOccurred(), "apply the CR in k8s api failed")
+
+			Eventually(func() error {
+				return ensureGRHelpersReady(cs, nodes, peersConfig.Peers())
+			}, time.Minute, time.Second).ShouldNot(HaveOccurred(),
+				"helpers should advertise a fresh OPEN without the restart bit")
 
 			check := func() error {
 				for _, p := range peersConfig.Peers() {
@@ -157,6 +172,56 @@ var _ = ginkgo.Describe("Establish BGP session with EnableGracefulRestart", func
 		)
 	})
 })
+
+// ensureGRHelpersReady checks the helper OPENs received by every node. An old
+// session retains its R-bit after the helper startup timer expires, so reconnect
+// those helpers during setup, before the continuous route-retention check.
+func ensureGRHelpersReady(cs clientset.Interface, nodes []corev1.Node, peers []config.Peer) error {
+	if len(nodes) == 0 || len(peers) == 0 {
+		return errors.New("no nodes or GR helpers configured")
+	}
+	pods, err := k8s.FRRK8sPods(cs)
+	if err != nil {
+		return err
+	}
+	podsByNode := make(map[string]*corev1.Pod, len(pods))
+	for _, pod := range pods {
+		podsByNode[pod.Spec.NodeName] = pod
+	}
+
+	var pending error
+	reconnect := map[string]frrcontainer.FRR{}
+	for _, node := range nodes {
+		pod, found := podsByNode[node.Name]
+		if !found {
+			pending = errors.Join(pending, fmt.Errorf("no FRR pod on node %s", node.Name))
+			continue
+		}
+		neighbors, err := frr.NeighborsInfo(executor.ForPod(pod.Namespace, pod.Name, k8s.FRRContainerName))
+		if err != nil {
+			pending = errors.Join(pending, fmt.Errorf("query node %s neighbors: %w", node.Name, err))
+			continue
+		}
+		for _, peer := range peers {
+			neighbor, found := neighbors[peer.IP]
+			if !found || !neighbor.Connected || neighbor.GRInfo.RemoteGrMode != "Helper" {
+				pending = errors.Join(pending, fmt.Errorf("helper %s is not established on node %s", peer.IP, node.Name))
+				continue
+			}
+			if neighbor.GRInfo.RBit {
+				pending = errors.Join(pending, fmt.Errorf("helper %s advertises the restart bit on node %s", peer.IP, node.Name))
+				reconnect[peer.FRR.Name] = peer.FRR
+			}
+		}
+	}
+	for _, helper := range reconnect {
+		out, err := helper.Exec("vtysh", "-c", "clear bgp *")
+		if err != nil {
+			return fmt.Errorf("reconnect helper %s: %w: %s", helper.Name, err, out)
+		}
+	}
+	return pending
+}
 
 // checkPrefixesOnNode checks that prefixes have at one kernel route on the
 // the node. This function get routes directly from the node `docker exec ip
