@@ -1,0 +1,183 @@
+Client: bfd
+------------------------
+FD: 34
+Connect Time: 00:02:13
+Not registered for Nexthop Updates
+Client will Not be notified about the status of its routes.
+Last Msg Rx Time: 00:02:13
+Last Msg Tx Time: 00:02:13
+Last Sent Cmd: ZEBRA_BFD_DEST_REPLAY
+
+Type        Add         Update      Del
+==================================================
+IPv4        0           0           0
+IPv6        0           0           0
+Redist:v4   0           0           0
+Redist:v6   0           0           0
+NHG         0           0           0
+VRF         1           0           0
+Connected   4           0           0
+Interface   0           0           0
+Intf Addr   6           0           0
+BFD peer    0           0           0
+NHT v4      0           0           0
+NHT v6      0           0           0
+VxLAN SG    0           0           0
+VNI         0           0           0
+L3-VNI      0           0           0
+MAC-IP      0           0           0
+ES          0           0           0
+ES-EVI      0           0           0
+Errors: 0
+Input Fifo: 0:3 Output Fifo: 0:9
+
+
+Client: bgp
+------------------------
+FD: 40
+Connect Time: 00:02:13
+Nexthop Registry Time: 00:02:09
+Nexthop Last Update Time: 00:02:09
+Client will Not be notified about the status of its routes.
+Last Msg Rx Time: 00:02:08
+Last Msg Tx Time: 00:02:09
+Last Rcvd Cmd: ZEBRA_CLIENT_CAPABILITIES
+Last Sent Cmd: ZEBRA_NEXTHOP_UPDATE
+
+Type        Add         Update      Del
+==================================================
+IPv4        0           0           0
+IPv6        1           0           0
+Redist:v4   0           0           0
+Redist:v6   0           0           0
+NHG         0           0           0
+VRF         1           0           0
+Connected   4           0           0
+Interface   0           0           0
+Intf Addr   6           0           0
+BFD peer    0           0           0
+NHT v4      0           0           0
+NHT v6      2           0           0
+VxLAN SG    0           0           0
+VNI         0           0           0
+L3-VNI      0           0           0
+MAC-IP      0           0           0
+ES          0           0           0
+ES-EVI      0           0           0
+Errors: 0
+VRF : default
+Capabilities : Graceful Restart
+AFI 1 enabled, route sync DONE
+AFI 2 enabled, route sync DONE
+AFI 3 enabled, route sync DONE
+Route sync finished at Tue Nov  3 06:40:26 2026
+Input Fifo: 0:3 Output Fifo: 0:8
+
+Stale Client Information
+------------------------
+VRF : default
+Capabilities : Graceful Restart(500 seconds)
+Last restart time : 00:02:10 ago
+Stalepath removal time: 500 sec
+
+Client: vnc
+------------------------
+FD: 44
+Connect Time: 00:02:13
+Not registered for Nexthop Updates
+Client will Not be notified about the status of its routes.
+Last Msg Rx Time: 00:02:13
+Last Msg Tx Time: 00:02:13
+Last Sent Cmd: ZEBRA_INTERFACE_LINK_PARAMS
+
+Type        Add         Update      Del
+==================================================
+IPv4        0           0           0
+IPv6        0           0           0
+Redist:v4   0           0           0
+Redist:v6   0           0           0
+NHG         0           0           0
+VRF         1           0           0
+Connected   2           0           0
+Interface   0           0           0
+Intf Addr   3           0           0
+BFD peer    0           0           0
+NHT v4      0           0           0
+NHT v6      0           0           0
+VxLAN SG    0           0           0
+VNI         0           0           0
+L3-VNI      0           0           0
+MAC-IP      0           0           0
+ES          0           0           0
+ES-EVI      0           0           0
+Errors: 0
+Input Fifo: 0:1 Output Fifo: 0:6
+
+
+Client: static
+------------------------
+FD: 52
+Connect Time: 00:02:13
+Not registered for Nexthop Updates
+Client will be notified about the status of its routes.
+Last Msg Rx Time: 00:02:13
+Last Msg Tx Time: 00:02:13
+Last Sent Cmd: ZEBRA_INTERFACE_LINK_PARAMS
+
+Type        Add         Update      Del
+==================================================
+IPv4        0           0           0
+IPv6        0           0           0
+Redist:v4   0           0           0
+Redist:v6   0           0           0
+NHG         0           0           0
+VRF         1           0           0
+Connected   4           0           0
+Interface   0           0           0
+Intf Addr   6           0           0
+BFD peer    0           0           0
+NHT v4      0           0           0
+NHT v6      0           0           0
+VxLAN SG    0           0           0
+VNI         0           0           0
+L3-VNI      0           0           0
+MAC-IP      0           0           0
+ES          0           0           0
+ES-EVI      0           0           0
+Errors: 0
+Input Fifo: 0:4 Output Fifo: 0:6
+
+
+Client: bgp [1]
+------------------------
+FD: 60
+Connect Time: 00:02:12
+Not registered for Nexthop Updates
+Client will Not be notified about the status of its routes.
+Last Msg Rx Time: 00:02:12
+Last Msg Tx Time: 00:02:12
+Last Rcvd Cmd: ZEBRA_LABEL_MANAGER_CONNECT
+Last Sent Cmd: ZEBRA_LABEL_MANAGER_CONNECT
+
+Type        Add         Update      Del
+==================================================
+IPv4        0           0           0
+IPv6        0           0           0
+Redist:v4   0           0           0
+Redist:v6   0           0           0
+NHG         0           0           0
+VRF         0           0           0
+Connected   0           0           0
+Interface   0           0           0
+Intf Addr   0           0           0
+BFD peer    0           0           0
+NHT v4      0           0           0
+NHT v6      0           0           0
+VxLAN SG    0           0           0
+VNI         0           0           0
+L3-VNI      0           0           0
+MAC-IP      0           0           0
+ES          0           0           0
+ES-EVI      0           0           0
+Errors: 0
+Input Fifo: 0:1 Output Fifo: 0:0

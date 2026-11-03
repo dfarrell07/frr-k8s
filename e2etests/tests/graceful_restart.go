@@ -33,10 +33,11 @@ import (
 
 var _ = ginkgo.Describe("Establish BGP session with EnableGracefulRestart", func() {
 	var (
-		cs       clientset.Interface
-		updater  *config.Updater
-		reporter *k8sreporter.KubernetesReporter
-		nodes    []corev1.Node
+		cs        clientset.Interface
+		updater   *config.Updater
+		reporter  *k8sreporter.KubernetesReporter
+		nodes     []corev1.Node
+		observers *grCIObservers
 	)
 
 	cleanup := func(u *config.Updater) error {
@@ -53,6 +54,7 @@ var _ = ginkgo.Describe("Establish BGP session with EnableGracefulRestart", func
 
 	ginkgo.BeforeEach(func() {
 		var err error
+		observers = nil
 
 		reporter = dump.NewK8sReporter(k8s.FRRK8sNamespace)
 		updater, err = config.NewUpdater()
@@ -68,14 +70,20 @@ var _ = ginkgo.Describe("Establish BGP session with EnableGracefulRestart", func
 	})
 
 	ginkgo.AfterEach(func() {
-		if ginkgo.CurrentSpecReport().Failed() {
-			testName := ginkgo.CurrentSpecReport().LeafNodeText
-			dump.K8sInfo(testName, reporter)
-			dump.BGPInfo(testName, infra.FRRContainers, cs)
+		var diagnosticErr error
+		defer func() {
+			diagnosticErr = errors.Join(diagnosticErr, observers.cleanup(), cleanup(updater))
+			Expect(diagnosticErr).NotTo(HaveOccurred(), "GR CI diagnostics and cleanup")
+		}()
+		// Finish the independent window before diagnostic FRR reads or cleanup,
+		// including when the original Consistently assertion failed early.
+		diagnosticErr = observers.finish()
+		testName := ginkgo.CurrentSpecReport().LeafNodeText
+		dump.K8sInfo(testName, reporter)
+		dump.BGPInfo(testName, infra.FRRContainers, cs)
+		if observers != nil {
+			diagnosticErr = errors.Join(diagnosticErr, dumpGRCIRuntime(cs, observers.dir, "after", observers.expectedAFI))
 		}
-
-		err := cleanup(updater)
-		Expect(err).NotTo(HaveOccurred(), "cleanup config in API and infra containers")
 	})
 
 	ginkgo.Context("When restarting the frrk8s deamon pods", func() {
@@ -154,18 +162,25 @@ var _ = ginkgo.Describe("Establish BGP session with EnableGracefulRestart", func
 			Eventually(check, time.Minute, time.Second).ShouldNot(HaveOccurred(),
 				"routes should exist before we restart frr-k8s")
 
+			observers, err = startGRCIObservers(cs, nodes, externalPrefixes, frrs, prefix)
+			Expect(err).NotTo(HaveOccurred(), "start independent kernel-route observers")
+
 			ginkgo.By("GR started")
 			c := make(chan struct{})
+			var restartCompleted time.Time
 			go func() { // go restart frr-k8s while Consistently check that route exists
 				defer ginkgo.GinkgoRecover()
 				err := k8s.RestartFRRK8sPods(cs)
 				Expect(err).NotTo(HaveOccurred(), "frr-k8s pods failed to restart")
+				restartCompleted = time.Now()
 				close(c)
 			}()
 
 			// 2*time.Minute is important because that is the Graceful Restart timer.
 			Consistently(check, 2*time.Minute, time.Second).ShouldNot(HaveOccurred())
 			Eventually(c, time.Minute, time.Second).Should(BeClosed(), "restart FRRK8s pods are not yet ready")
+			<-c // The close publishes restartCompleted to this goroutine.
+			Expect(observers.checkRestartCoverage(restartCompleted)).NotTo(HaveOccurred(), "GR observer restart coverage")
 		},
 			ginkgo.Entry("IPV4", ipfamily.IPv4, "192.168.2.0/24"),
 			ginkgo.Entry("IPV6", ipfamily.IPv6, "fc00:f853:ccd:e799::/64"),
