@@ -3,6 +3,7 @@
 package tests
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"strconv"
@@ -174,6 +175,20 @@ var _ = ginkgo.Describe("EVPN sessions", func() {
 								return err
 							}
 						}
+						out, err := executor.ForPod(pod.Namespace, pod.Name, k8s.FRRContainerName).Exec("vtysh", "-d", "bgpd", "-c", "show bgp vrf default summary json")
+						if err != nil {
+							return fmt.Errorf("reading BGP summary on pod %s: %w", pod.Name, err)
+						}
+						var summary map[string]struct {
+							Peers map[string]struct {
+								State    string `json:"state"`
+								Received *int   `json:"pfxRcd"`
+								Sent     *int   `json:"pfxSnt"`
+							} `json:"peers"`
+						}
+						if err := json.Unmarshal([]byte(out), &summary); err != nil {
+							return fmt.Errorf("parsing BGP summary on pod %s: %w", pod.Name, err)
+						}
 						for _, peerIP := range evpnFRRContainer.AddressesForFamily(peerFamily) {
 							labels := map[string]string{"peer": peerIP, "vrf": "default", "afi": "l2vpn", "safi": "evpn"}
 							for _, metric := range []string{"frrk8s_bgp_family_announced_prefixes", "frrk8s_bgp_family_received_prefixes"} {
@@ -181,11 +196,46 @@ var _ = ginkgo.Describe("EVPN sessions", func() {
 									return fmt.Errorf("EVPN prefixes for peer %s: %w", peerIP, err)
 								}
 							}
-							// The default VRF exchanges EVPN routes, while its unicast
-							// family receives none, even when type-5 routes carry IP prefixes.
-							labels["afi"], labels["safi"] = ipfamily.ForAddress(net.ParseIP(peerIP)).String(), "unicast"
-							if err := metrics.ValidateGaugeValue(0, "frrk8s_bgp_family_received_prefixes", labels, podMetrics); err != nil {
-								return fmt.Errorf("unicast prefixes for peer %s: %w", peerIP, err)
+							// Neighbor counters can differ from installed routes. Use the
+							// independent summary command for family counts and legacy totals.
+							var received, sent int
+							for family, state := range summary {
+								counts, ok := state.Peers[peerIP]
+								if !ok {
+									continue
+								}
+								if counts.State != "Established" {
+									return fmt.Errorf("BGP summary peer %s family %s is not Established", peerIP, family)
+								}
+								if counts.Received == nil || counts.Sent == nil || *counts.Received < 0 || *counts.Sent < 0 {
+									return fmt.Errorf("missing or invalid BGP summary counts for peer %s family %s", peerIP, family)
+								}
+								received += *counts.Received
+								sent += *counts.Sent
+							}
+							unicastAFI := ipfamily.ForAddress(net.ParseIP(peerIP)).String()
+							for _, family := range []struct{ key, afi, safi string }{
+								{unicastAFI + "Unicast", unicastAFI, "unicast"},
+								{"l2VpnEvpn", "l2vpn", "evpn"},
+							} {
+								counts, ok := summary[family.key].Peers[peerIP]
+								if !ok {
+									return fmt.Errorf("missing BGP summary peer %s family %s", peerIP, family.key)
+								}
+								labels["afi"], labels["safi"] = family.afi, family.safi
+								if err := metrics.ValidateGaugeValue(*counts.Received, "frrk8s_bgp_family_received_prefixes", labels, podMetrics); err != nil {
+									return fmt.Errorf("%s received prefixes for peer %s: %w", family.key, peerIP, err)
+								}
+								if err := metrics.ValidateGaugeValue(*counts.Sent, "frrk8s_bgp_family_announced_prefixes", labels, podMetrics); err != nil {
+									return fmt.Errorf("%s announced prefixes for peer %s: %w", family.key, peerIP, err)
+								}
+							}
+							peerLabels := map[string]string{"peer": peerIP, "vrf": "default"}
+							if err := metrics.ValidateGaugeValue(received, "frrk8s_bgp_received_prefixes_total", peerLabels, podMetrics); err != nil {
+								return fmt.Errorf("total received prefixes for peer %s: %w", peerIP, err)
+							}
+							if err := metrics.ValidateGaugeValue(sent, "frrk8s_bgp_announced_prefixes_total", peerLabels, podMetrics); err != nil {
+								return fmt.Errorf("total announced prefixes for peer %s: %w", peerIP, err)
 							}
 						}
 						if err := metrics.ValidateGaugeValue(1, "frrk8s_evpn_vni_info", map[string]string{
