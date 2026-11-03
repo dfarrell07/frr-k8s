@@ -135,33 +135,57 @@ jobs:
           path: /tmp/frrk8s.tar
   build-frr-gr:
     runs-on: ubuntu-22.04
-    permissions:
-      actions: read
     steps:
-      # Reuse the complete FRR payload built from production source 1895cc222.
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
+      - name: Checkout corrected FRR
+        uses: actions/checkout@v4
         with:
-          name: image-tar-frr-gr
-          run-id: 41606878896
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: /tmp/frr-image
-      - uses: actions/download-artifact@v4
-        with:
-          name: frr-gr-build-evidence
-          run-id: 41606878896
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          path: /tmp/frr-evidence
-      - name: Verify the tested production artifact
+          repository: dfarrell07/frr
+          ref: 4007568de4ba2465f5a49783c2baf772bf503611
+          path: frr-source
+      - name: Prepare source archive
         run: |
-          printf '%s  %s\n' 'd6f316d612f515927861f5709db380af8b2159bfaff3f9bec962250cd287ffca' '/tmp/frr-image/frr-gr.tar' | sha256sum -c -
-          IFS= read -r gr_source_revision < /tmp/frr-evidence/source-revision.txt
-          test "$gr_source_revision" = '1895cc222daa2438eeb9318a96bec9704c2f9d8f'
+          mkdir -p /tmp/frr-build/source
+          git -C frr-source rev-parse HEAD > /tmp/frr-build/source-revision.txt
+          git -C frr-source archive HEAD > /tmp/frr-source.tar
+          sha256sum /tmp/frr-source.tar > /tmp/frr-build/source-archive.sha256
+          tar -xf /tmp/frr-source.tar -C /tmp/frr-build/source
+          cp .github/frr-gr/Dockerfile /tmp/frr-build/Dockerfile
+      - uses: docker/setup-buildx-action@v3
+      - name: Build and test corrected FRR image
+        uses: docker/build-push-action@v5
+        with:
+          context: /tmp/frr-build
+          target: runtime
+          tags: localhost/frr-gr-validation:4007568d
+          outputs: type=docker,dest=/tmp/frr-gr.tar
+          cache-from: type=gha,scope=frr-gr
+          cache-to: type=gha,mode=max,scope=frr-gr
+      - name: Export native test and build evidence
+        uses: docker/build-push-action@v5
+        with:
+          context: /tmp/frr-build
+          target: evidence
+          outputs: type=local,dest=/tmp/frr-evidence
+          cache-from: type=gha,scope=frr-gr
+      - name: Record runtime payload
+        run: |
+          docker load -i /tmp/frr-gr.tar
+          docker image inspect localhost/frr-gr-validation:4007568d > /tmp/frr-evidence/image.json
+          docker run --rm --entrypoint sh localhost/frr-gr-validation:4007568d -ec '
+            for daemon in bgpd zebra bfdd staticd mgmtd watchfrr; do
+              /usr/lib/frr/$daemon --version
+              ldd /usr/lib/frr/$daemon
+              sha256sum /usr/lib/frr/$daemon
+            done
+          ' > /tmp/frr-evidence/runtime.txt
       - uses: actions/upload-artifact@v4
         with:
           name: image-tar-frr-gr
-          path: /tmp/frr-image/frr-gr.tar
+          path: /tmp/frr-gr.tar
           retention-days: 7
       - uses: actions/upload-artifact@v4
+        if: ${{ always() }}
         with:
           name: frr-gr-build-evidence
           path: /tmp/frr-evidence
@@ -213,9 +237,9 @@ jobs:
           MAKE_RULE="deploy-with-prometheus"
           if [ ${{ matrix.deployment }} = "helm" ]; then MAKE_RULE="deploy-helm"; fi
           LOGLEVEL=debug IP_FAMILY="${{ matrix.ip-family }}" make deploy-cluster
-          bin/kind load docker-image localhost/frr-gr-validation:1895cc22 -n frr-k8s
-          (cd config/frr-k8s && ../../bin/kustomize edit set image quay.io/frrouting/frr=localhost/frr-gr-validation:1895cc22)
-          HELM_ARGS="--set frrk8s.frr.image.repository=localhost/frr-gr-validation --set frrk8s.frr.image.tag=1895cc22 --set frrk8s.frr.image.pullPolicy=Never" LOGLEVEL=debug IP_FAMILY="${{ matrix.ip-family }}" make $MAKE_RULE
+          bin/kind load docker-image localhost/frr-gr-validation:4007568d -n frr-k8s
+          (cd config/frr-k8s && ../../bin/kustomize edit set image quay.io/frrouting/frr=localhost/frr-gr-validation:4007568d)
+          HELM_ARGS="--set frrk8s.frr.image.repository=localhost/frr-gr-validation --set frrk8s.frr.image.tag=4007568d --set frrk8s.frr.image.pullPolicy=Never" LOGLEVEL=debug IP_FAMILY="${{ matrix.ip-family }}" make $MAKE_RULE
           mkdir -p /tmp/kind_logs/
 
       - name: E2E
@@ -283,8 +307,8 @@ jobs:
           --set prometheus.serviceMonitor.metricRelabelings[1].replacement=\"metallb_bfd_\\\$\$1\" \
           "
           KIND_CLUSTER_NAME="kind" NAMESPACE=metallb-system LOGLEVEL=debug IP_FAMILY="ipv4" make deploy-cluster
-          bin/kind load docker-image localhost/frr-gr-validation:1895cc22 -n kind
-          helm_args="$helm_args --set frrk8s.frr.image.repository=localhost/frr-gr-validation --set frrk8s.frr.image.tag=1895cc22 --set frrk8s.frr.image.pullPolicy=Never"
+          bin/kind load docker-image localhost/frr-gr-validation:4007568d -n kind
+          helm_args="$helm_args --set frrk8s.frr.image.repository=localhost/frr-gr-validation --set frrk8s.frr.image.tag=4007568d --set frrk8s.frr.image.pullPolicy=Never"
           KIND_CLUSTER_NAME="kind" NAMESPACE=metallb-system LOGLEVEL=debug IP_FAMILY="ipv4" HELM_ARGS=${helm_args} make "deploy-helm"
           mkdir -p /tmp/kind_logs/
 
