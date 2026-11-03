@@ -82,7 +82,7 @@ var _ = ginkgo.Describe("Establish BGP session with EnableGracefulRestart", func
 		dump.K8sInfo(testName, reporter)
 		dump.BGPInfo(testName, infra.FRRContainers, cs)
 		if observers != nil {
-			diagnosticErr = errors.Join(diagnosticErr, dumpGRCIRuntime(cs, observers.dir, "after", observers.expectedAFI))
+			diagnosticErr = errors.Join(diagnosticErr, dumpGRCIRuntime(cs, observers.dir, "after", observers.expectedAFI, observers.earliestStart()))
 		}
 	})
 

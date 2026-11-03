@@ -110,7 +110,7 @@ func startGRCIObservers(cs clientset.Interface, nodes []corev1.Node, prefixes []
 	if err := os.WriteFile(filepath.Join(dir, "observer.py"), []byte(grRouteWatch), 0644); err != nil {
 		return group, err
 	}
-	if err := dumpGRCIRuntime(cs, dir, "before", expectedAFI); err != nil {
+	if err := dumpGRCIRuntime(cs, dir, "before", expectedAFI, time.Time{}); err != nil {
 		return group, err
 	}
 	// Use the already-present helper image by immutable local ID: no image pull,
@@ -327,16 +327,25 @@ func (group *grCIObservers) finish() error {
 	return failures
 }
 
-func (group *grCIObservers) checkRestartCoverage(completed time.Time) error {
+func (group *grCIObservers) earliestStart() time.Time {
 	if group == nil || len(group.observers) == 0 {
-		return errors.New("GR measurement fault: no observer deadlines for restart completion")
+		return time.Time{}
 	}
-	deadline := group.observers[0].started.Add(grObserverDuration)
+	started := group.observers[0].started
 	for _, observer := range group.observers[1:] {
-		if candidate := observer.started.Add(grObserverDuration); candidate.Before(deadline) {
-			deadline = candidate
+		if observer.started.Before(started) {
+			started = observer.started
 		}
 	}
+	return started
+}
+
+func (group *grCIObservers) checkRestartCoverage(completed time.Time) error {
+	started := group.earliestStart()
+	if started.IsZero() {
+		return errors.New("GR measurement fault: no observer deadlines for restart completion")
+	}
+	deadline := started.Add(grObserverDuration)
 	// Both timestamps retain Go's monotonic clock component. Starting the bound
 	// before the observer process launches is conservative about its true end.
 	within := !completed.IsZero() && !completed.After(deadline)
@@ -389,7 +398,7 @@ func (group *grCIObservers) cleanup() error {
 	return failures
 }
 
-func dumpGRCIRuntime(cs clientset.Interface, dir, phase string, expectedAFI int) error {
+func dumpGRCIRuntime(cs clientset.Interface, dir, phase string, expectedAFI int, windowStart time.Time) error {
 	pods, err := k8s.FRRK8sPods(cs)
 	if err != nil {
 		return err
@@ -401,6 +410,7 @@ func dumpGRCIRuntime(cs clientset.Interface, dir, phase string, expectedAFI int)
 	var failures error
 	failures = errors.Join(failures, os.WriteFile(filepath.Join(dir, phase+"-pods-image-ids.json"), metadata, 0644))
 	for _, pod := range pods {
+		utcVerified := false
 		for _, status := range pod.Status.ContainerStatuses {
 			if status.ImageID == "" {
 				failures = errors.Join(failures, fmt.Errorf("pod %s container %s has no image ID", pod.Name, status.Name))
@@ -410,18 +420,43 @@ func dumpGRCIRuntime(cs clientset.Interface, dir, phase string, expectedAFI int)
 			container, name string
 			args            []string
 		}{
+			{k8s.FRRContainerName, "timezone", []string{"date", "+%Z %z"}},
 			{k8s.FRRContainerName, "zebra-client", []string{"vtysh", "-d", "zebra", "-c", "show zebra client"}},
 			{k8s.FRRContainerName, "frr-sha256", []string{"sha256sum", "/usr/lib/frr/bgpd", "/usr/lib/frr/zebra", "/usr/lib/frr/watchfrr", "/usr/bin/vtysh", "/usr/lib/libfrr.so.0"}},
 			{"frr-metrics", "metrics-sha256", []string{"sha256sum", "/etc/frr_metrics/frr-metrics", "/usr/bin/vtysh", "/usr/lib/libfrr.so.0"}},
 		} {
 			args := []string{"exec", pod.Name, "-n", pod.Namespace, "-c", capture.container, "--"}
+			readStarted := time.Now()
 			out, err := grCICommand(10*time.Second, executor.Kubectl, append(args, capture.args...)...)
+			readDuration := time.Since(readStarted)
 			path := filepath.Join(dir, phase+"-"+pod.Name+"-"+capture.name+".log")
 			failures = errors.Join(failures, err, os.WriteFile(path, []byte(out), 0644))
-			if phase == "after" && capture.name == "zebra-client" && err == nil {
-				if err := checkGRCIZebraSync(out, expectedAFI); err != nil {
-					failures = errors.Join(failures, fmt.Errorf("pod %s GR completion: %w; see %s", pod.Name, err, path))
+			if capture.name == "timezone" {
+				utcVerified = err == nil && strings.TrimSpace(out) == "UTC +0000"
+				if !utcVerified {
+					failures = errors.Join(failures, fmt.Errorf("GR measurement fault: pod %s default timezone must be UTC +0000, got %q", pod.Name, out))
 				}
+			}
+			if phase == "after" && capture.name == "zebra-client" && err == nil {
+				syncErr := checkGRCIZebraSync(out, expectedAFI)
+				rendered, completionErr := checkGRCIZebraCompletion(out, windowStart, readDuration)
+				validationErr := errors.Join(syncErr, completionErr)
+				if validationErr != nil {
+					failures = errors.Join(failures, fmt.Errorf("pod %s GR completion: %w; see %s", pod.Name, validationErr, path))
+				}
+				var parsed, lower, upper any
+				if !rendered.IsZero() {
+					parsed, lower, upper = rendered, rendered.Add(-time.Second-readDuration), rendered.Add(2*time.Second)
+				}
+				bounds, marshalErr := json.MarshalIndent(map[string]any{"expected_afi": expectedAFI,
+					"window_start": windowStart, "original_120s_deadline": windowStart.Add(2 * time.Minute),
+					"rendered_sync_time": parsed, "completion_lower_bound": lower, "completion_upper_bound": upper,
+					"read_duration_seconds": readDuration.Seconds(), "dut_utc_verified": utcVerified,
+					"qualified": utcVerified && validationErr == nil, "validation_error": fmt.Sprint(validationErr),
+					"comparison_clock":    "UTC wall time; FRR integer monotime conversion",
+					"rounding_assumption": "stable realtime/monotonic offset; FRR inter-read pause bounded by full successful command duration"}, "", "  ")
+				failures = errors.Join(failures, marshalErr,
+					os.WriteFile(filepath.Join(dir, phase+"-"+pod.Name+"-gr-completion-bounds.json"), bounds, 0644))
 			}
 		}
 	}
@@ -441,6 +476,33 @@ func dumpGRCIRuntime(cs clientset.Interface, dir, phase string, expectedAFI int)
 // Validate only the active routing client, excluding bgp [1] notifications and
 // Stale Client Information. Keep the complete original output in the artifact.
 func checkGRCIZebraSync(output string, expectedAFI int) error {
+	body, err := grCIBGPDefault(output)
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(body, "Capabilities : Graceful Restart") {
+		return errors.New("default bgp client does not have Graceful Restart enabled")
+	}
+	expectedFound := false
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "AFI ") {
+			continue
+		}
+		var afi int
+		var state string
+		if n, err := fmt.Sscanf(line, "AFI %d enabled, route sync %s", &afi, &state); err != nil || n != 2 || afi < 1 || state != "DONE" {
+			return fmt.Errorf("default bgp route synchronization is incomplete: %s", line)
+		}
+		expectedFound = expectedFound || afi == expectedAFI
+	}
+	if !expectedFound {
+		return fmt.Errorf("default bgp client is missing enabled AFI %d synchronization state", expectedAFI)
+	}
+	return nil
+}
+
+func grCIBGPDefault(output string) (string, error) {
 	client, clients := "", 0
 	for _, block := range strings.Split(output, "Client:") {
 		name, body, _ := strings.Cut(block, "\n")
@@ -449,7 +511,7 @@ func checkGRCIZebraSync(output string, expectedAFI int) error {
 		}
 	}
 	if clients != 1 {
-		return fmt.Errorf("expected one active bgp client, got %d", clients)
+		return "", fmt.Errorf("expected one active bgp client, got %d", clients)
 	}
 	client, _, _ = strings.Cut(client, "Stale Client Information")
 	for _, block := range strings.Split(client, "VRF :") {
@@ -457,26 +519,49 @@ func checkGRCIZebraSync(output string, expectedAFI int) error {
 		if strings.TrimSpace(name) != "default" {
 			continue
 		}
-		if !strings.Contains(body, "Capabilities : Graceful Restart") {
-			return errors.New("default bgp client does not have Graceful Restart enabled")
-		}
-		expectedFound := false
-		for _, line := range strings.Split(body, "\n") {
-			line = strings.TrimSpace(line)
-			if !strings.HasPrefix(line, "AFI ") {
-				continue
-			}
-			var afi int
-			var state string
-			if n, err := fmt.Sscanf(line, "AFI %d enabled, route sync %s", &afi, &state); err != nil || n != 2 || afi < 1 || state != "DONE" {
-				return fmt.Errorf("default bgp route synchronization is incomplete: %s", line)
-			}
-			expectedFound = expectedFound || afi == expectedAFI
-		}
-		if !expectedFound {
-			return fmt.Errorf("default bgp client is missing enabled AFI %d synchronization state", expectedAFI)
-		}
-		return nil
+		return body, nil
 	}
-	return errors.New("active bgp client has no default VRF")
+	return "", errors.New("active bgp client has no default VRF")
+}
+
+func checkGRCIZebraCompletion(output string, windowStart time.Time, readDuration time.Duration) (time.Time, error) {
+	body, err := grCIBGPDefault(output)
+	if err != nil {
+		return time.Time{}, err
+	}
+	const prefix = "Route sync finished at "
+	var timestamps []string
+	for _, line := range strings.Split(body, "\n") {
+		if line = strings.TrimSpace(line); strings.HasPrefix(line, prefix) {
+			timestamps = append(timestamps, strings.TrimPrefix(line, prefix))
+		}
+	}
+	if len(timestamps) != 1 {
+		return time.Time{}, fmt.Errorf("expected one active bgp/default completion timestamp, got %d", len(timestamps))
+	}
+	// ANSIC has no timezone or fractional seconds. The caller validates the
+	// container's default UTC timezone with OS date, outside the observed window.
+	rendered, err := time.ParseInLocation(time.ANSIC, timestamps[0], time.UTC)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("parse bgp/default completion timestamp: %w", err)
+	}
+	if windowStart.IsZero() {
+		return rendered, errors.New("GR measurement fault: missing original observation start")
+	}
+	if readDuration < 0 {
+		return rendered, errors.New("GR measurement fault: negative zebra-client command duration")
+	}
+	// FRR stores floor(event MONOTIME), then renders time(NULL) minus
+	// (floor(current MONOTIME) - stored). Under a stable realtime/monotonic
+	// offset, the whole successful command's monotonic duration bounds a pause
+	// between those two reads. Use [rendered-1s-readDuration, rendered+2s],
+	// a rounding envelope rather than an exact subsecond completion timestamp.
+	// Require that whole envelope inside the ORIGINAL 120s check.
+	lower, upper := rendered.Add(-time.Second-readDuration), rendered.Add(2*time.Second)
+	deadline := windowStart.Add(2 * time.Minute)
+	if lower.Before(windowStart) || upper.After(deadline) {
+		return rendered, fmt.Errorf("GR lifecycle completion rounding envelope [%s, %s] outside original interval [%s, %s]",
+			lower, upper, windowStart, deadline)
+	}
+	return rendered, nil
 }
