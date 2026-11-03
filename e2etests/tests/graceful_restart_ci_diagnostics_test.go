@@ -152,3 +152,57 @@ func TestGRCIZebraIntegerTimeRounding(t *testing.T) {
 		})
 	}
 }
+
+func TestGRCIFinishSummary(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(map[string]any)
+		want   string
+	}{
+		{"healthy degraded cadence", nil, ""},
+		{"exactly one-second coverage", func(s map[string]any) { s["max_success_gap_ms"] = 1000 }, "GR measurement fault"},
+		{"over one-second coverage", func(s map[string]any) { s["max_success_gap_ms"] = 1000.001 }, "GR measurement fault"},
+		{"observed withdrawal despite child exit zero", func(s map[string]any) { s["target_withdrawals"] = 1 }, "GR observed target withdrawal"},
+		{"missing coverage field", func(s map[string]any) { delete(s, "max_success_gap_ms") }, "GR measurement fault"},
+		{"missing withdrawal field", func(s map[string]any) { delete(s, "target_withdrawals") }, "GR measurement fault"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			summary := map[string]any{
+				"kind": "summary", "window_complete": true, "absence_observed": false,
+				"observer_loss": false, "query_errors": 0, "termination_signal": nil,
+				"requested_duration_seconds": 135, "elapsed_seconds": 135.005,
+				"samples": 13497, "missed_poll_deadlines": 2, "interval_max_ms": 55,
+				"max_success_gap_ms": 56, "target_withdrawals": 0,
+			}
+			if tc.change != nil {
+				tc.change(summary)
+			}
+			data, err := json.Marshal(summary)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "routes.jsonl")
+			if err := os.WriteFile(path, append(data, '\n'), 0600); err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan struct{})
+			close(done)
+			// Already finished and removed: finish() never starts a timer, and
+			// its real failure-cleanup path cannot invoke the container runtime.
+			group := &grCIObservers{armed: true, cancel: func() {}, observers: []*grObserver{
+				{node: "summary-fixture", path: path, done: done, removed: true, waitErr: nil},
+			}}
+			err = group.finish()
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("healthy degraded summary rejected: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("finish() = %v, want %q", err, tc.want)
+			}
+			if tc.want == "GR observed target withdrawal" && strings.Contains(err.Error(), "GR kernel-route retention failure") {
+				t.Fatalf("observed withdrawal was misreported as whole-prefix absence: %v", err)
+			}
+		})
+	}
+}

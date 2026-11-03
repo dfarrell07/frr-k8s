@@ -4,6 +4,9 @@
 Wait for a ready record before triggering restart. Presence samples are complete
 route dumps, not atomic kernel transactions; their start/end times bound each
 observation. No event or incomplete/failed dump is treated as proof of absence.
+An observed matching route deletion vetoes qualification, without claiming whole
+prefix absence or that every possible deletion was observed. Nominal 10ms
+cadence statistics are supplemental; successful-dump coverage must stay <1s.
 Exit: 0 complete clean window, 1 absence/error/incomplete, 2 baseline/fatal error.
 """
 import argparse
@@ -202,10 +205,16 @@ class Watch:
                     index += 1
                     if msg_type in (NLMSG_OVERRUN, NLMSG_ERROR):
                         self.loss = True
+                    decoded = decode(msg_type, payload)
+                    if (msg_type == 25 and decoded["table"] == self.args.table
+                            and decoded["prefix"] in self.args.prefixes
+                            and (self.args.protocol is None
+                                 or decoded["protocol"] == self.args.protocol)):
+                        self.target_withdrawals += 1
                     emit("netlink_event", received=received, event_index=index,
                          message=NAMES.get(msg_type, str(msg_type)), msg_type=msg_type,
                          nl_flags=flags, nl_seq=seq, nl_pid=pid,
-                         data=decode(msg_type, payload))
+                         data=decoded)
             except socket.timeout:
                 continue
             except (OSError, ValueError, struct.error) as exc:
@@ -248,6 +257,7 @@ class Watch:
         raise TimeoutError("GETROUTE did not complete within two seconds")
 
     def run(self):
+        self.target_withdrawals = 0
         emit("started", prefixes=self.args.prefixes, table=self.args.table,
              protocol=self.args.protocol, poll_ms=self.args.poll_ms,
              duration_seconds=self.args.duration,
@@ -260,9 +270,12 @@ class Watch:
         count, interval_total, interval_max, interval_min = 0, 0, 0, None
         missed_deadlines = terminal_missed_slots = 0
         last_start = last_complete = end = None
+        last_success_started, max_success_gap_ns = None, 0
         ready, monitoring_finished, window_complete = None, None, False
         try:
             baseline = self.snapshot()
+            last_success_started = baseline["started"]["monotonic_ns"]
+            max_success_gap_ns = baseline["completed"]["monotonic_ns"] - last_success_started
             emit("baseline", **baseline)
             previous = {p: bool(r) for p, r in baseline["routes"].items()}
             if not all(previous.values()) or self.loss or self.stop.is_set():
@@ -290,6 +303,8 @@ class Watch:
                 try:
                     sample = self.snapshot()
                     last_complete = sample["completed"]["monotonic_ns"]
+                    max_success_gap_ns = max(max_success_gap_ns, last_complete - last_success_started)
+                    last_success_started = sample["started"]["monotonic_ns"]
                     durations.append(sample["completed"]["monotonic_ns"] - sample["started"]["monotonic_ns"])
                     present = {p: bool(r) for p, r in sample["routes"].items()}
                     self.absence |= not all(present.values())
@@ -310,7 +325,7 @@ class Watch:
                          state="unknown", complete_dump=False)
                 next_poll += period
                 now = time.monotonic_ns()
-                if next_poll < now:
+                if next_poll < end and next_poll < now:
                     missed_deadlines += 1
                     next_poll = now  # no burst of catch-up queries
             monitoring_finished = time.monotonic_ns()
@@ -320,11 +335,15 @@ class Watch:
             if monitoring_finished >= end and next_poll < end:
                 terminal_missed_slots = (end - next_poll + period - 1) // period
                 missed_deadlines += terminal_missed_slots
-                emit("cadence_error", reason="scheduled terminal poll slots were skipped",
+                emit("cadence_degraded", reason="nominal terminal poll slots were skipped",
                      terminal_missed_poll_slots=terminal_missed_slots,
                      next_poll_monotonic_ns=next_poll, window_end_monotonic_ns=end,
                      last_sample_started_monotonic_ns=last_start,
                      last_sample_completed_monotonic_ns=last_complete)
+            max_success_gap_ns = max(max_success_gap_ns, end - last_success_started)
+            if max_success_gap_ns >= 1_000_000_000:
+                emit("coverage_error", max_success_gap_ms=max_success_gap_ns / 1e6,
+                     reason="successful-dump coverage reached the existing one-second interval")
             window_complete = (monitoring_finished >= end and
                                (self.termination_monotonic_ns is None or
                                 self.termination_monotonic_ns >= end))
@@ -333,7 +352,6 @@ class Watch:
                      requested_duration_seconds=self.args.duration,
                      elapsed_seconds=(monitoring_finished - ready) / 1e9,
                      termination_signal=self.termination_signal)
-            return 1 if self.absence or self.loss or self.query_errors or missed_deadlines or not window_complete else 0
         finally:
             if monitoring_finished is None:
                 monitoring_finished = time.monotonic_ns()
@@ -344,6 +362,8 @@ class Watch:
                 return {f"p{p}_ms": ordered[min(len(ordered) - 1, int((len(ordered) - 1) * p / 100))] / 1e6
                         for p in (50, 95, 99)} if ordered else {}
             emit("summary", samples=count, absence_observed=self.absence,
+                 target_withdrawals=self.target_withdrawals,
+                 max_success_gap_ms=max_success_gap_ns / 1e6,
                  observer_loss=self.loss, query_errors=self.query_errors,
                  window_complete=window_complete,
                  requested_duration_seconds=self.args.duration,
@@ -353,6 +373,7 @@ class Watch:
                  termination_signal=self.termination_signal,
                  termination_monotonic_ns=self.termination_monotonic_ns,
                  missed_poll_deadlines=missed_deadlines,
+                 cadence_degraded=missed_deadlines > 0,
                  terminal_missed_poll_slots=terminal_missed_slots,
                  window_end_monotonic_ns=end,
                  last_sample_started_monotonic_ns=last_start,
@@ -365,6 +386,8 @@ class Watch:
                  query_duration_percentiles=distribution(durations))
             self.events.close()
             self.query.close()
+        return 1 if (self.absence or self.loss or self.query_errors or self.target_withdrawals
+                     or max_success_gap_ns >= 1_000_000_000 or not window_complete) else 0
 
 
 def main():

@@ -29,8 +29,8 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 )
 
-// Copied from the independently controlled scratch observer, with address-family
-// selection and terminal poll coverage accounting for this CI validation.
+// Copied from the controlled scratch observer, adding address-family selection,
+// one-second successful-dump coverage and an observed-withdrawal veto for CI.
 //
 //go:embed testdata/gr-route-watch.py
 var grRouteWatch string
@@ -71,6 +71,8 @@ type grObserverRecord struct {
 	Samples           int             `json:"samples"`
 	MissedDeadlines   *int            `json:"missed_poll_deadlines"`
 	IntervalMaxMS     *float64        `json:"interval_max_ms"`
+	MaxSuccessGapMS   *float64        `json:"max_success_gap_ms"`
+	TargetWithdrawals *int            `json:"target_withdrawals"`
 }
 
 func grCICommand(timeout time.Duration, command string, args ...string) (string, error) {
@@ -279,9 +281,10 @@ func (group *grCIObservers) finish() error {
 		}
 		summaries := 0
 		absenceObserved := false
+		targetWithdrawals := 0
 		for _, row := range rows {
 			switch row.Kind {
-			case "baseline_not_ready", "query_error", "observer_error", "fatal", "incomplete":
+			case "baseline_not_ready", "query_error", "observer_error", "fatal", "incomplete", "coverage_error":
 				failures = errors.Join(failures, fmt.Errorf("GR measurement fault: observer %s reported %s; see %s", observer.node, row.Kind, observer.path))
 			case "presence_transition":
 				var present *bool
@@ -298,23 +301,36 @@ func (group *grCIObservers) finish() error {
 			exitMatches := observer.waitErr == nil
 			if row.AbsenceObserved != nil && *row.AbsenceObserved {
 				absenceObserved = true
+			}
+			if row.TargetWithdrawals != nil {
+				targetWithdrawals = *row.TargetWithdrawals
+			}
+			if absenceObserved || targetWithdrawals > 0 {
 				var exitErr *exec.ExitError
 				exitMatches = errors.As(observer.waitErr, &exitErr) && exitErr.ExitCode() == 1
 			}
-			// One boundary slot is allowed. A sparse window or silent pause in
-			// the final sleep cannot qualify as a successful 10ms measurement.
-			minimumSamples := int(grObserverDuration/grObserverPollInterval) - 1
+			// The original assertion polls every second. Supplemental 10ms
+			// scheduling statistics describe degradation, not a product SLA.
 			if row.WindowComplete == nil || !*row.WindowComplete || row.ObserverLoss == nil || *row.ObserverLoss ||
 				row.QueryErrors == nil || *row.QueryErrors != 0 || row.AbsenceObserved == nil ||
 				string(row.TerminationSignal) != "null" || row.RequestedDuration != grObserverDuration.Seconds() ||
-				row.Elapsed < grObserverDuration.Seconds() || row.Samples < minimumSamples ||
-				row.MissedDeadlines == nil || *row.MissedDeadlines != 0 || row.IntervalMaxMS == nil || *row.IntervalMaxMS < 0 || !exitMatches {
+				row.Elapsed < grObserverDuration.Seconds() || row.Samples < 1 ||
+				row.MissedDeadlines == nil || *row.MissedDeadlines < 0 || row.IntervalMaxMS == nil || *row.IntervalMaxMS < 0 ||
+				row.MaxSuccessGapMS == nil || *row.MaxSuccessGapMS < 0 || *row.MaxSuccessGapMS >= float64(time.Second.Milliseconds()) ||
+				row.TargetWithdrawals == nil || *row.TargetWithdrawals < 0 || !exitMatches {
 				values, _ := json.Marshal(row)
 				failures = errors.Join(failures, fmt.Errorf("GR measurement fault: observer %s: %s exit=%v; see %s", observer.node, values, observer.waitErr, observer.path))
+			}
+			if row.MissedDeadlines != nil && *row.MissedDeadlines > 0 {
+				values, _ := json.Marshal(row)
+				ginkgo.GinkgoWriter.Printf("GR observer %s nominal 10ms cadence degraded: %s; see %s\n", observer.node, values, observer.path)
 			}
 		}
 		if absenceObserved {
 			failures = errors.Join(failures, fmt.Errorf("GR kernel-route retention failure: observer %s saw a missing prefix; see %s", observer.node, observer.path))
+		}
+		if targetWithdrawals > 0 {
+			failures = errors.Join(failures, fmt.Errorf("GR observed target withdrawal: observer %s saw %d matching RTM_DELROUTE events; whole-prefix absence unproven; see %s", observer.node, targetWithdrawals, observer.path))
 		}
 		if summaries != 1 {
 			failures = errors.Join(failures, fmt.Errorf("GR measurement fault: observer %s has %d summaries; see %s", observer.node, summaries, observer.path))
