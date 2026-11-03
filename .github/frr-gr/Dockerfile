@@ -19,10 +19,10 @@ RUN ./bootstrap.sh && \
       --enable-multipath=64 --enable-vty-group=frrvty --enable-user=frr \
       --enable-group=frr --enable-pcre2posix --enable-scripting \
       --with-pkg-extra-version=_git CC=cc CXX=c++ && \
-    make -j4 all tests/bgpd/test_gr_replay tests/bgpd/test_peer_attr && \
+    make -j4 all tests/bgpd/test_gr_replay tests/bgpd/test_gr_eor tests/bgpd/test_peer_attr && \
     (cd tests && PYTHONPATH=helpers/python python3 -m pytest -q \
       --junitxml=/evidence/native.xml \
-      bgpd/test_gr_replay.py bgpd/test_peer_attr.py) && \
+      bgpd/test_gr_replay.py bgpd/test_gr_eor.py bgpd/test_peer_attr.py) && \
     make DESTDIR=/stage install && \
     cp config.h config.log config.status Makefile /evidence/ && \
     apk info -v > /evidence/build-packages.txt && \
@@ -32,5 +32,5 @@ FROM scratch AS evidence
 COPY --from=build /evidence/ /
 
 FROM quay.io/frrouting/frr@sha256:89e5e1ec8b17c5dffaf57dbac58a29ebeb3731a84e5bc09dad1662adff2ba7f5 AS runtime
-LABEL org.opencontainers.image.revision="4007568de4ba2465f5a49783c2baf772bf503611"
+LABEL org.opencontainers.image.revision="9cfa2040d418cbfb11aceb2d07443c8f6289dc0f"
 COPY --from=build /stage/ /
