@@ -1,6 +1,6 @@
 # FRR captures
 
-These public lab fixtures were ported from the concurrent reference exporter
+The initial public lab fixtures were ported from the concurrent reference exporter
 working tree on 2026-11-02 (published baseline `3f88c3a` plus local corrections).
 All captures are FRR 10.4.3. They contain no production configuration.
 `bgp_neighbors.json`, `bfd_{peers,counters}.json`, and `evpn_vni.json` use the
@@ -41,3 +41,11 @@ Tests corrupt copies of these captures to exercise invalid and missing fields.
 with an up named SBFD-init session (`qualified-first`) between IPv6 loopbacks
 `2001:db8::1` and `2001:db8::2`, reflector discriminator 4242. Its `bfd-name`
 marker must reject ordinary BFD collection even without an identity collision.
+
+`bgp_families.json` was captured on 2026-11-02 with `show bgp vrf all neighbors json`
+from the same 10.4.3 image. Peers `10.193.0.2/.3` (AS 65001/65002) activate IPv6
+unicast and IPv4 VPN, with default IPv4 unicast and network import checks disabled.
+Each originates `2001:db8:{1,2}::/64`; VRF `red` exports `192.0.{1,2}.0/24` with labels
+101/102, RDs `6500{1,2}:100` and RT `65000:100`. FRR reports one accepted and two
+sent prefixes per family; tests preserve those counts.
+[Source capture](https://github.com/dfarrell07/frr-metrics-exporter/blob/9120ea9600abd3f079ba457f34b5896c61f783f5/collector/testdata/bgp_families.json).
