@@ -6,6 +6,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -135,8 +136,8 @@ func promHandler() (*exporter, error) {
 	if err != nil {
 		return nil, err
 	}
-	if *scrapeTimeout <= 0 {
-		return nil, fmt.Errorf("scrape-timeout must be positive")
+	if *scrapeTimeout <= 0 || *scrapeTimeout > time.Duration(math.MaxInt64)-5*time.Second {
+		return nil, fmt.Errorf("scrape-timeout must be positive and leave room for the 5s response budget")
 	}
 	return &exporter{run: (vtysh.Vtysh{}).Run, cs: cs, timeout: *scrapeTimeout,
 		base: prometheus.DefaultGatherer, httpMetrics: prometheus.NewRegistry(), sem: make(chan struct{}, maxScrapes), responses: make(chan struct{}, maxResponses), logger: logging.GetLogger()}, nil

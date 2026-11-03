@@ -247,26 +247,37 @@ func TestMetricsHandlerInClusterConstructor(t *testing.T) {
 		}
 	})
 
-	t.Run("authorization shares the deadline and recovers", func(t *testing.T) {
-		e, reviews, reads, request, _ := phase(t)
-		start := time.Now()
-		if code, _ := request("hold-access-delayed", "1"); code != http.StatusInternalServerError {
-			t.Fatalf("expired authorization returned %d", code)
-		}
-		if elapsed := time.Since(start); elapsed < 750*time.Millisecond || elapsed > 1250*time.Millisecond {
-			t.Fatalf("authentication and authorization did not share the 900ms budget: %v", elapsed)
-		}
-		deadline := time.Now().Add(time.Second)
-		for reviews.active.Load() != 0 && time.Now().Before(deadline) {
-			time.Sleep(time.Millisecond)
-		}
-		if reviews.canceledAccess.Load() != 1 || reviews.active.Load() != 0 || len(e.responses) != 0 || reads.Load() != 0 {
-			t.Fatal("expired authorization retained API/response work or read FRR")
-		}
-		if code, _ := request("recovered", ""); code != http.StatusOK || reads.Load() == 0 {
-			t.Fatalf("authorization did not recover: status=%d, reads=%d", code, reads.Load())
-		}
-	})
+	for _, budget := range []struct {
+		name, header string
+		timeout      time.Duration
+	}{
+		{"announced", "1", 8 * time.Second},
+		{"configured", "", 900 * time.Millisecond},
+	} {
+		t.Run("authorization shares the "+budget.name+" deadline and recovers", func(t *testing.T) {
+			original := *scrapeTimeout
+			*scrapeTimeout = budget.timeout
+			t.Cleanup(func() { *scrapeTimeout = original })
+			e, reviews, reads, request, _ := phase(t)
+			start := time.Now()
+			if code, _ := request("hold-access-delayed", budget.header); code != http.StatusInternalServerError {
+				t.Fatalf("expired authorization returned %d", code)
+			}
+			if elapsed := time.Since(start); elapsed < 750*time.Millisecond || elapsed > 1250*time.Millisecond {
+				t.Fatalf("authentication and authorization did not share the 900ms budget: %v", elapsed)
+			}
+			deadline := time.Now().Add(time.Second)
+			for reviews.active.Load() != 0 && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if reviews.canceledAccess.Load() != 1 || reviews.active.Load() != 0 || len(e.responses) != 0 || reads.Load() != 0 {
+				t.Fatal("expired authorization retained API/response work or read FRR")
+			}
+			if code, _ := request("recovered", ""); code != http.StatusOK || reads.Load() == 0 {
+				t.Fatalf("authorization did not recover: status=%d, reads=%d", code, reads.Load())
+			}
+		})
+	}
 
 	t.Run("expired TokenReview waves stay bounded and shutdown cancels them", func(t *testing.T) {
 		e, reviews, reads, request, shutdown := phase(t)

@@ -22,6 +22,25 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 )
 
+func TestScrapeTimeoutBounds(t *testing.T) {
+	if err := logging.Init(); err != nil {
+		t.Fatal(err)
+	}
+	original := *scrapeTimeout
+	t.Cleanup(func() { *scrapeTimeout = original })
+	maxTimeout := time.Duration(1<<63-1) - 5*time.Second
+	for _, timeout := range []time.Duration{-1, 0, time.Nanosecond, 100 * time.Millisecond, maxTimeout, maxTimeout + 1, time.Duration(1<<63 - 1)} {
+		t.Run(timeout.String(), func(t *testing.T) {
+			*scrapeTimeout = timeout
+			_, err := newMetricsHandler(true)
+			valid := timeout > 0 && timeout <= maxTimeout
+			if (err == nil) != valid || err != nil && !strings.Contains(err.Error(), "scrape-timeout") {
+				t.Fatalf("timeout %v: error=%v, want valid=%v", timeout, err, valid)
+			}
+		})
+	}
+}
+
 func TestStandaloneDoesNotChangeKubernetesDefault(t *testing.T) {
 	if err := logging.Init(); err != nil {
 		t.Fatal(err)
