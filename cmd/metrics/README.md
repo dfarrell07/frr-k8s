@@ -31,3 +31,9 @@ collector still exports session state when only its counter read failed.
 The VNI collector runs one `show evpn vni json` read per scrape. A failed read or
 parse omits all VNI series and sets `frrk8s_scrape_success{collector="evpn"}` to 0.
 Remote VTEPs are L2-only because FRR reports `"n/a"` for L3.
+
+Each vtysh command has an 8s deadline, below Prometheus's default 10s `scrape_timeout`,
+and goes only to the daemon it reads: bgpd for
+`show bgp`, bfdd for `show bfd` and zebra for `show evpn`; `show daemons` still goes to
+all of them. Collectors can run concurrently, but each collector issues its reads in sequence, and
+the response waits for every collector, so slow reads can still exceed the scrape timeout.
