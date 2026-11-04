@@ -10,18 +10,26 @@ import (
 
 	certutil "k8s.io/client-go/util/cert"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// For applies TLS options with a process-lifetime certificate watcher. Callers
+// owning a server context should use ForContext to handle watcher failures.
+func For(tlsOpt func(*tls.Config), certFile, keyFile string) (*tls.Config, error) {
+	return ForContext(context.Background(), tlsOpt, certFile, keyFile, nil)
+}
+
 // ForContext applies TLS options and watches an explicit key pair until ctx
-// ends. Without a key pair, it generates a self-signed certificate once.
-func ForContext(ctx context.Context, tlsOpt func(*tls.Config), certFile, keyFile string) (*tls.Config, error) {
+// ends. A watcher failure is reported to onWatcherError, or logged when nil.
+// Without a key pair, it generates a self-signed certificate once.
+func ForContext(ctx context.Context, tlsOpt func(*tls.Config), certFile, keyFile string, onWatcherError func(error)) (*tls.Config, error) {
 	cfg := &tls.Config{}
 	tlsOpt(cfg)
 	if (certFile == "") != (keyFile == "") {
 		return nil, fmt.Errorf("certificate and private key must be supplied together")
 	}
 	if certFile != "" {
-		return withCertWatcher(ctx, cfg, certFile, keyFile)
+		return withCertWatcher(ctx, cfg, certFile, keyFile, onWatcherError)
 	}
 	return withSelfSigned(cfg)
 }
@@ -54,12 +62,23 @@ func withSelfSigned(cfg *tls.Config) (*tls.Config, error) {
 	return cfg, nil
 }
 
-func withCertWatcher(ctx context.Context, cfg *tls.Config, certFile, keyFile string) (*tls.Config, error) {
+func withCertWatcher(ctx context.Context, cfg *tls.Config, certFile, keyFile string, onError func(error)) (*tls.Config, error) {
 	cw, err := certwatcher.New(certFile, keyFile)
 	if err != nil {
 		return nil, fmt.Errorf("creating cert watcher: %w", err)
 	}
-	go cw.Start(ctx) //nolint:errcheck // certwatcher logs errors internally via its logr.Logger.
+	go runCertWatcher(ctx, cw.Start, onError)
 	cfg.GetCertificate = cw.GetCertificate
 	return cfg, nil
+}
+
+func runCertWatcher(ctx context.Context, start func(context.Context) error, onError func(error)) {
+	if err := start(ctx); err != nil && ctx.Err() == nil {
+		err = fmt.Errorf("watching server certificate: %w", err)
+		if onError != nil {
+			onError(err)
+			return
+		}
+		logf.Log.Error(err, "Certificate watcher stopped")
+	}
 }

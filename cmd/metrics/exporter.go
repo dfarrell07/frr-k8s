@@ -46,8 +46,10 @@ var (
 
 func main() {
 	flag.Parse()
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	ctx, cancel := context.WithCancelCause(signalCtx)
+	defer cancel(nil)
 
 	if err := logging.Init(); err != nil {
 		fmt.Printf("failed to initialize logging: %s\n", err)
@@ -76,7 +78,7 @@ func main() {
 		level.Error(logger).Log("msg", "invalid metrics access flags", "error", err)
 		os.Exit(1)
 	}
-	tlsCfg, err := tlsconfig.ForContext(ctx, tlsOpt, *tlsCertFile, *tlsKeyFile)
+	tlsCfg, err := tlsconfig.ForContext(ctx, tlsOpt, *tlsCertFile, *tlsKeyFile, cancel)
 	if err != nil {
 		level.Error(logger).Log("msg", "failed to configure TLS", "error", err)
 		os.Exit(1)

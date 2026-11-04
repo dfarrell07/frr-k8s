@@ -64,6 +64,9 @@ func serveListener(ctx context.Context, srv *http.Server, listener net.Listener,
 	cancel()
 	active.Wait()
 	if errors.Is(err, http.ErrServerClosed) {
+		if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
+			return cause
+		}
 		return nil
 	}
 	return err

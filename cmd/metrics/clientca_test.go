@@ -84,7 +84,7 @@ func start(t *testing.T, c tlsFiles) (string, func()) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := tlsconfig.ForContext(t.Context(), opt, c.certFile, c.keyFile)
+	cfg, err := tlsconfig.ForContext(t.Context(), opt, c.certFile, c.keyFile, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

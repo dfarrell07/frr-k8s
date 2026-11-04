@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -19,12 +20,16 @@ import (
 )
 
 func startServer(t *testing.T, handler http.Handler, grace time.Duration) (string, context.CancelFunc, <-chan error) {
+	return startServerContext(t, context.Background(), handler, grace)
+}
+
+func startServerContext(t *testing.T, ctx context.Context, handler http.Handler, grace time.Duration) (string, context.CancelFunc, <-chan error) {
 	t.Helper()
 	opt, err := tlsconfig.OptFor("", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := tlsconfig.ForContext(t.Context(), opt, "", "")
+	cfg, err := tlsconfig.ForContext(t.Context(), opt, "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +38,7 @@ func startServer(t *testing.T, handler http.Handler, grace time.Duration) (strin
 		t.Fatal(err)
 	}
 	srv := &http.Server{Handler: handler, TLSConfig: cfg, ReadTimeout: 100 * time.Millisecond, WriteTimeout: time.Minute}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan error, 1)
 	go func() { done <- serveListener(ctx, srv, listener, grace) }()
 	t.Cleanup(cancel)
@@ -82,8 +87,23 @@ func TestShutdownWaitsForWrappedScrapeCleanup(t *testing.T) {
 }
 
 func TestShutdownDrainsActiveRequest(t *testing.T) {
+	for _, cause := range []error{nil, errors.New("server certificate watcher stopped")} {
+		name := "signal"
+		if cause != nil {
+			name = "watcher failure"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancelCause(t.Context())
+			defer cancel(nil)
+			testShutdownDrainsActiveRequest(t, ctx, func() { cancel(cause) }, cause)
+		})
+	}
+}
+
+func testShutdownDrainsActiveRequest(t *testing.T, ctx context.Context, cancel context.CancelFunc, cause error) {
+	t.Helper()
 	started, release := make(chan struct{}), make(chan struct{})
-	addr, stop, done := startServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	addr, _, done := startServerContext(t, ctx, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		close(started)
 		<-release
 		if r.Context().Err() != nil {
@@ -109,13 +129,13 @@ func TestShutdownDrainsActiveRequest(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("request did not start")
 	}
-	stop()
+	cancel()
 	close(release)
 	if got := <-response; got != "drained" {
 		t.Fatal(got)
 	}
-	if err := <-done; err != nil {
-		t.Fatal(err)
+	if err := <-done; !errors.Is(err, cause) {
+		t.Fatalf("shutdown returned %v, want %v", err, cause)
 	}
 }
 
@@ -181,7 +201,7 @@ func TestSlowTLSClientsBoundResponsesAndRecover(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := tlsconfig.ForContext(t.Context(), opt, "", "")
+	cfg, err := tlsconfig.ForContext(t.Context(), opt, "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
