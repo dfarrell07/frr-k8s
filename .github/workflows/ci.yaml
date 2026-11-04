@@ -141,7 +141,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: dfarrell07/frr
-          ref: 5f97ec4a258294de1676d6ef82a03e3a061d37d9
+          ref: 7725ab2d42ae1e7fadecfbe7aa7128a0164eb480
           path: frr-source
       - name: Prepare source archive
         run: |
@@ -157,7 +157,7 @@ jobs:
         with:
           context: /tmp/frr-build
           target: runtime
-          tags: localhost/frr-gr-validation:5f97ec4a
+          tags: localhost/frr-gr-validation:7725ab2d
           outputs: type=docker,dest=/tmp/frr-gr.tar
           cache-from: type=gha,scope=frr-gr
           cache-to: type=gha,mode=max,scope=frr-gr
@@ -171,8 +171,8 @@ jobs:
       - name: Record runtime payload
         run: |
           docker load -i /tmp/frr-gr.tar
-          docker image inspect localhost/frr-gr-validation:5f97ec4a > /tmp/frr-evidence/image.json
-          docker run --rm --entrypoint sh localhost/frr-gr-validation:5f97ec4a -ec '
+          docker image inspect localhost/frr-gr-validation:7725ab2d > /tmp/frr-evidence/image.json
+          docker run --rm --entrypoint sh localhost/frr-gr-validation:7725ab2d -ec '
             for daemon in bgpd zebra bfdd staticd mgmtd watchfrr; do
               /usr/lib/frr/$daemon --version
               ldd /usr/lib/frr/$daemon
@@ -237,9 +237,9 @@ jobs:
           MAKE_RULE="deploy-with-prometheus"
           if [ ${{ matrix.deployment }} = "helm" ]; then MAKE_RULE="deploy-helm"; fi
           LOGLEVEL=debug IP_FAMILY="${{ matrix.ip-family }}" make deploy-cluster
-          bin/kind load docker-image localhost/frr-gr-validation:5f97ec4a -n frr-k8s
-          (cd config/frr-k8s && ../../bin/kustomize edit set image quay.io/frrouting/frr=localhost/frr-gr-validation:5f97ec4a)
-          HELM_ARGS="--set frrk8s.frr.image.repository=localhost/frr-gr-validation --set frrk8s.frr.image.tag=5f97ec4a --set frrk8s.frr.image.pullPolicy=Never" LOGLEVEL=debug IP_FAMILY="${{ matrix.ip-family }}" make $MAKE_RULE
+          bin/kind load docker-image localhost/frr-gr-validation:7725ab2d -n frr-k8s
+          (cd config/frr-k8s && ../../bin/kustomize edit set image quay.io/frrouting/frr=localhost/frr-gr-validation:7725ab2d)
+          HELM_ARGS="--set frrk8s.frr.image.repository=localhost/frr-gr-validation --set frrk8s.frr.image.tag=7725ab2d --set frrk8s.frr.image.pullPolicy=Never" LOGLEVEL=debug IP_FAMILY="${{ matrix.ip-family }}" make $MAKE_RULE
           mkdir -p /tmp/kind_logs/
 
       - name: E2E
@@ -307,8 +307,8 @@ jobs:
           --set prometheus.serviceMonitor.metricRelabelings[1].replacement=\"metallb_bfd_\\\$\$1\" \
           "
           KIND_CLUSTER_NAME="kind" NAMESPACE=metallb-system LOGLEVEL=debug IP_FAMILY="ipv4" make deploy-cluster
-          bin/kind load docker-image localhost/frr-gr-validation:5f97ec4a -n kind
-          helm_args="$helm_args --set frrk8s.frr.image.repository=localhost/frr-gr-validation --set frrk8s.frr.image.tag=5f97ec4a --set frrk8s.frr.image.pullPolicy=Never"
+          bin/kind load docker-image localhost/frr-gr-validation:7725ab2d -n kind
+          helm_args="$helm_args --set frrk8s.frr.image.repository=localhost/frr-gr-validation --set frrk8s.frr.image.tag=7725ab2d --set frrk8s.frr.image.pullPolicy=Never"
           KIND_CLUSTER_NAME="kind" NAMESPACE=metallb-system LOGLEVEL=debug IP_FAMILY="ipv4" HELM_ARGS=${helm_args} make "deploy-helm"
           mkdir -p /tmp/kind_logs/
 

@@ -32,5 +32,5 @@ FROM scratch AS evidence
 COPY --from=build /evidence/ /
 
 FROM quay.io/frrouting/frr@sha256:89e5e1ec8b17c5dffaf57dbac58a29ebeb3731a84e5bc09dad1662adff2ba7f5 AS runtime
-LABEL org.opencontainers.image.revision="5f97ec4a258294de1676d6ef82a03e3a061d37d9"
+LABEL org.opencontainers.image.revision="7725ab2d42ae1e7fadecfbe7aa7128a0164eb480"
 COPY --from=build /stage/ /
