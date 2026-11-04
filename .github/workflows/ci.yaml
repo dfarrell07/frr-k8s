@@ -35,7 +35,7 @@ jobs:
         run: |
           LOGLEVEL=debug IP_FAMILY=dual make deploy-with-prometheus
           mkdir -p /tmp/kind_logs
-          bin/kubectl -n frr-k8s-system get pods -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{range .status.containerStatuses[*]}{.name}{" "}{.imageID}{"\n"}{end}{end}'
+          bin/kubectl --kubeconfig=bin/kubeconfig -n frr-k8s-system get pods -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{range .status.containerStatuses[*]}{.name}{" "}{.imageID}{"\n"}{end}{end}'
       - name: Repeat original L2 EVPN cases with original seed
         run: |
           GINKGO_ARGS="--focus 'EVPN sessions.*DUALSTACK configurations with IPv6 peering.*with L2 VNI' --seed=1793735237 --repeat=9" TEST_ARGS="--report-path=/tmp/kind_logs" make e2etests
