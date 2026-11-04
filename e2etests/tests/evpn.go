@@ -96,6 +96,14 @@ var _ = ginkgo.Describe("EVPN sessions", func() {
 
 	ginkgo.AfterEach(func() {
 		if ginkgo.CurrentSpecReport().Failed() {
+			pods, err := k8s.FRRK8sPods(cs)
+			fmt.Fprintf(ginkgo.GinkgoWriter, "listing EVPN diagnostic targets: %v\n", err)
+			for _, pod := range pods {
+				dumpEVPNDatapath(pod.Spec.NodeName, executor.ForPod(pod.Namespace, pod.Name, k8s.FRRContainerName))
+			}
+			if evpnFRRContainer != nil {
+				dumpEVPNDatapath(evpnFRRContainer.Name, evpnFRRContainer)
+			}
 			testName := ginkgo.CurrentSpecReport().LeafNodeText
 			dump.K8sInfo(testName, reporter)
 			dump.BGPInfo(testName, infra.FRRContainers, cs)
@@ -630,6 +638,20 @@ func expectedL2VNIRoutes(frrk8sPods []*corev1.Pod) (map[string]string, error) {
 		routes[mac] = pod.Status.HostIP
 	}
 	return routes, nil
+}
+
+func dumpEVPNDatapath(name string, exec executor.Executor) {
+	for _, cmd := range [][]string{
+		{"bridge", "fdb", "show"},
+		{"bridge", "vlan", "show"},
+		{"bridge", "vni", "show"},
+		{"ip", "-s", "neigh", "show"},
+		{"ip", "-d", "link", "show"},
+		{"vtysh", "-c", "show bgp l2vpn evpn route json", "-c", "show evpn vni detail"},
+	} {
+		out, err := exec.Exec(cmd[0], cmd[1:]...)
+		fmt.Fprintf(ginkgo.GinkgoWriter, "EVPN diagnostic %s %v: %v\n%s\n", name, cmd, err, out)
+	}
 }
 
 func ping(exec executor.Executor, targetIP string) error {
