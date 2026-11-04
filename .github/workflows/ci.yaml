@@ -107,6 +107,12 @@ jobs:
         run: |
           make test
 
+      - name: Metrics race and constructor tests
+        run: |
+          go test -race ./cmd/metrics/... ./internal/tlsconfig/...
+          docker pull quay.io/frrouting/frr:10.6.2
+          CONTAINER_RUNTIME=docker bash hack/metrics-constructor-test.sh
+
   build-test-images:
     runs-on: ubuntu-22.04
     strategy:

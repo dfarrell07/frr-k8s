@@ -41,7 +41,7 @@ collector success and absent expected series as well as `up`: FRR failure can
 return HTTP 200 with collector success 0. Inconsistent output such as duplicate series returns 500.
 
 Authentication and concurrent FRR collection share `--scrape-timeout` (default
-8s), lowered to 90% of Prometheus's announced timeout. Eight requests may
+8s), lowered to 90% of Prometheus's announced timeout. Eight metrics requests may
 authenticate, collect or write; excess requests return 503 before Kubernetes or
 FRR calls. Four scrapes may read FRR concurrently; excess authenticated requests
 return 503 before reading FRR. Slow responses release collection slots but
@@ -63,7 +63,7 @@ a failed ES read also discards VNI data.
 
 ## Standalone authentication
 
-For a host outside Kubernetes, require a trusted client certificate:
+For direct remote scraping, require a trusted client certificate:
 
 ```sh
 ./frr-metrics --disable-metrics-auth --collectors=bgp,bfd,evpn \
@@ -90,12 +90,13 @@ New connections, including resumed TLS sessions, use the new CA; authenticated
 keep-alive connections retain access. Restart to close existing connections when
 removing trust. This does not implement certificate revocation lists.
 
-## Container checks and downstream builds
+## Validation
 
 Run `go test -race ./cmd/metrics/... ./internal/tlsconfig/...`; parser tests use
 [real captures](collector/testdata/README.md) and malformed variants.
-`bash hack/metrics-constructor-test.sh` checks the unchanged Kubernetes constructor
-with isolated fixture credentials; ordinary Go tests skip this container case.
+`bash hack/metrics-constructor-test.sh` checks the default Kubernetes authentication path
+with isolated fixture credentials. Set `CONTAINER_RUNTIME=docker` to use Docker.
+CI runs both checks; ordinary Go tests skip the container case.
 
 Run `bash hack/metrics-smoke.sh` (podman, openssl, curl, Linux
 802.3ad bonding, and Go unless using an existing binary).
@@ -107,15 +108,3 @@ and omit `METRICS_BINARY`; no host binary is mounted. Two virtual PEs
 exercise BGP/BFD, L2/L3 VNIs, membership, local ES/DF transitions, VNI deletion,
 concurrent scrapers, required client certificates, daemon hangs/recovery and
 SIGTERM during a hung read. These are local control-plane and process checks.
-
-`openshift/frr` builds `cmd/metrics` with its own `go.mod`, vendor tree and
-`Dockerfile.openshift` RHEL Go builder. To check a backport, apply `cmd/metrics`,
-the `internal/tlsconfig` change and `hack/metrics-smoke.sh` there, then run `go test -mod=vendor
-./cmd/metrics/... ./internal/tlsconfig/...` and `CGO_ENABLED=0 go build -mod=vendor
--o /tmp/frr-metrics ./cmd/metrics`. Test that binary with the smoke script before
-building `podman build -f Dockerfile.openshift .`.
-
-Host Go 1.26 with the downstream vendor tree can check source compatibility;
-only the actual RHEL image build establishes that build path. Appliance lifecycle,
-SELinux, FIPS validation, declared scale, forwarding and shared-CE HA still need
-qualification on the selected production image and platform.
