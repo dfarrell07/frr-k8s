@@ -55,6 +55,11 @@ var _ = ginkgo.Describe("Metrics", func() {
 	})
 
 	ginkgo.BeforeEach(func() {
+		if ginkgo.CurrentSpecReport().LeafNodeText == "IPV4 - advertise and receive" {
+			ginkgo.By("recording bgpd process mappings before metrics setup")
+			dump.BGPDProcessInfo(ginkgo.CurrentSpecReport().LeafNodeText, k8sclient.New())
+		}
+
 		ginkgo.By("Clearing any previous configuration")
 
 		for _, c := range infra.FRRContainers {

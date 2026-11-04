@@ -19,6 +19,34 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 )
 
+// BGPDProcessInfo records process mappings before setup can restart bgpd.
+// This diagnostic is best effort and does not change test assertions.
+func BGPDProcessInfo(testName string, cs clientset.Interface) {
+	testPath := path.Join(ReportPath, strings.ReplaceAll(testName, " ", "_"))
+	if err := os.MkdirAll(testPath, 0755); err != nil {
+		ginkgo.GinkgoWriter.Printf("Failed to create bgpd process dump directory: %v\n", err)
+		return
+	}
+	pods, err := k8s.FRRK8sPods(cs)
+	if err != nil {
+		ginkgo.GinkgoWriter.Printf("Failed to list pods for bgpd process dump: %v\n", err)
+		return
+	}
+	for _, pod := range pods {
+		out, err := executor.ForPod(pod.Namespace, pod.Name, k8s.FRRContainerName).Exec("sh", "-c",
+			`pid=$(cat /var/run/frr/bgpd.pid) || exit; printf 'bgpd PID: %s\n' "$pid"; cat "/proc/$pid/maps"`)
+		if err != nil {
+			out += fmt.Sprintf("\nFailed to read bgpd process mappings: %v\n", err)
+			ginkgo.GinkgoWriter.Printf("bgpd process dump for pod %s failed: %v\n", pod.Name, err)
+		}
+		out = fmt.Sprintf("Pod: %s, node: %s\n%s", pod.Name, pod.Spec.NodeName, out)
+		fileName := path.Join(testPath, fmt.Sprintf("bgpd-process-before-setup-%s.log", pod.Name))
+		if err := os.WriteFile(fileName, []byte(out), 0644); err != nil {
+			ginkgo.GinkgoWriter.Printf("Failed to write bgpd process dump for pod %s: %v\n", pod.Name, err)
+		}
+	}
+}
+
 func BGPInfo(testName string, FRRContainers []*frrcontainer.FRR, cs clientset.Interface) {
 	if ReportPath == "" {
 		ginkgo.GinkgoWriter.Printf("ReportPath is not set")
