@@ -92,7 +92,7 @@ func main() {
 		}
 	}
 	srv := &http.Server{
-		Addr:         net.JoinHostPort(*metricsBindAddress, fmt.Sprint(*metricsPort)),
+		Addr:         metricsAddress(*metricsBindAddress, *metricsPort),
 		ReadTimeout:  3 * time.Second,
 		WriteTimeout: *scrapeTimeout + 5*time.Second,
 		IdleTimeout:  2 * time.Minute,
@@ -110,6 +110,13 @@ func main() {
 		level.Error(logger).Log("error", err)
 		os.Exit(1)
 	}
+}
+
+func metricsAddress(host string, port uint) string {
+	if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
+		host = host[1 : len(host)-1]
+	}
+	return net.JoinHostPort(host, fmt.Sprint(port))
 }
 
 func newMetricsHandler(disableAuth bool) (*exporter, error) {
