@@ -116,7 +116,6 @@ func collectBFD(ctx context.Context, run Runner) ([]prometheus.Metric, error) {
 		}
 		byID[c.ID], keys[c.labels()] = c, true
 	}
-	seen := make(map[[5]string]bool, len(sessions))
 	var ms []prometheus.Metric
 	for _, s := range sessions {
 		if err := ctx.Err(); err != nil {
@@ -129,10 +128,6 @@ func collectBFD(ctx context.Context, run Runner) ([]prometheus.Metric, error) {
 			return nil, fmt.Errorf("BFD session has no ID, peer, multihop flag or status: %+v", s.bfdKey)
 		}
 		l := s.labels()
-		if seen[l] {
-			return nil, fmt.Errorf("two BFD sessions share the identity %+v", s.bfdKey)
-		}
-		seen[l] = true
 		c := byID[s.ID]
 		if c == nil || c.labels() != l {
 			return nil, fmt.Errorf("BFD session %d has no matching counters and identity", s.ID)

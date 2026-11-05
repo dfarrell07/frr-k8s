@@ -423,7 +423,7 @@ func TestBFDDuplicateIdentitiesFail(t *testing.T) {
 	a := bfdRow(1, "192.0.2.1", "192.0.2.10", true)
 	b := strings.Replace(a, `"id":1`, `"id":2`, 1)
 	for name, tc := range map[string]struct{ peers, counters string }{
-		"duplicate session":         {"[" + a + "," + a + "]", "[]"},
+		"duplicate session":         {"[" + a + "," + a + "]", "[" + a + "]"},
 		"duplicate counter row":     {"[]", "[" + a + "," + a + "]"},
 		"distinct ids share labels": {"[" + a + "," + b + "]", "[" + a + "," + b + "]"},
 	} {

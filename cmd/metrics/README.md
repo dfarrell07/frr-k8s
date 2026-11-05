@@ -40,13 +40,13 @@ missing measurements are omitted except for the legacy BGP totals above. Alert o
 collector success and absent expected series as well as `up`: FRR failure can
 return HTTP 200 with collector success 0. Inconsistent output such as duplicate series returns 500.
 
-Authentication and concurrent FRR collection share `--scrape-timeout` (default
-8s), lowered to 90% of Prometheus's announced timeout. Eight metrics requests may
-authenticate, collect or write; excess requests return 503 before Kubernetes or
-FRR calls. Four scrapes may read FRR concurrently; excess authenticated requests
-return 503 before reading FRR. Slow responses release collection slots but
-retain request slots while handling the response. Server
-read/write deadlines bound clients. CLI output is limited to 32 MiB per command.
+Authentication and FRR collection share `--scrape-timeout` (default 8s), reduced
+to 90% of Prometheus's announced timeout. At most eight metrics requests may
+authenticate, collect or write; at most four scrapes may read FRR concurrently.
+A full request limit returns 503 before Kubernetes/FRR calls; a full collection
+limit returns 503 before FRR reads. Response writers retain request slots after
+collection finishes. Server read/write deadlines bound clients; CLI output is
+limited to 32 MiB per command.
 
 Cached TokenReview lookups can outlive a scrape, under a ten-second timeout.
 Kubernetes API work is bounded; review saturation or timeouts return 500.
