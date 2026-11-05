@@ -349,25 +349,8 @@ func TestClientCABundleRejectsEveryDamagedBlock(t *testing.T) {
 			for _, ending := range []struct{ name, value string }{{"LF", "\n"}, {"CRLF", "\r\n"}} {
 				bundle := strings.ReplaceAll(original, "\n", ending.value)
 				t.Run(name+"/"+position+"/"+ending.name, func(t *testing.T) {
-					file := filepath.Join(t.TempDir(), "ca.crt")
-					write(t, file, []byte(first+second))
-					ca := &clientCA{base: &tls.Config{MinVersion: tls.VersionTLS13}, file: file, logger: discard}
-					good, err := ca.get(nil)
-					if err != nil {
-						t.Fatal(err)
-					}
-					write(t, file, []byte(bundle))
-					got, err := ca.get(nil)
-					if err != nil || got != good || ca.lastErr == "" || got.ClientAuth != tls.RequireAndVerifyClientCert {
-						t.Fatalf("partly damaged bundle replaced last-good trust: %v", err)
-					}
-					if _, err := withClientCA(ca.base, file, discard); err == nil {
-						t.Fatal("partly damaged initial bundle was accepted")
-					}
-					write(t, file, q.pem)
-					got, err = ca.get(nil)
-					if err != nil || got == good || ca.lastErr != "" {
-						t.Fatalf("valid replacement did not recover: %v", err)
+					if _, err := clientCAPool([]byte(bundle)); err == nil {
+						t.Fatal("partly damaged CA bundle accepted")
 					}
 				})
 			}

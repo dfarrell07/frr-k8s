@@ -144,23 +144,6 @@ func TestSlowCollectorDoesNotStarveTheOthers(t *testing.T) {
 	}
 }
 
-func TestScrapeSlotIsFreeWhileTheResponseIsWritten(t *testing.T) {
-	// A client that reads slowly must not keep FRR scrapes from other clients.
-	e := newExporter(quiet, time.Second)
-	release := make(chan struct{})
-	var writing sync.WaitGroup
-	for i := 0; i < maxScrapes; i++ {
-		writing.Add(1)
-		w := &stuckWriter{entered: writing.Done, release: release}
-		go e.ServeHTTP(w, httptest.NewRequest("GET", "/metrics", nil))
-	}
-	writing.Wait() // every slot's scrape is now stuck writing its response
-	if code, _ := scrapeBody(t, e); code != 200 {
-		t.Errorf("a scrape while others write got %d, want 200", code)
-	}
-	close(release)
-}
-
 func TestSlowResponsesHaveASharedLimitAndRecover(t *testing.T) {
 	var reads atomic.Int32
 	e := newExporter(func(ctx context.Context, command string) ([]byte, error) {

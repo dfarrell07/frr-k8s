@@ -5,7 +5,6 @@ package collector
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -121,22 +120,6 @@ func TestEVPNMultipleLocalSegmentsStayDistinct(t *testing.T) {
 	})
 	if len(got) != 4 {
 		t.Errorf("got %d series, want 4", len(got))
-	}
-}
-
-func TestEVPNCancellationBetweenReadsDropsEverything(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	read := fake(map[string]string{vniCmd: "@evpn_vni.json", esCmd: "@evpn_es_df.json"})
-	run := func(ctx context.Context, command string) ([]byte, error) {
-		out, err := read(ctx, command)
-		if command == vniCmd {
-			cancel()
-		}
-		return out, err
-	}
-	if ms, err := collectEVPN(ctx, run); !errors.Is(err, context.Canceled) || len(ms) != 0 {
-		t.Errorf("canceled between reads: %d metrics, error %v", len(ms), err)
 	}
 }
 

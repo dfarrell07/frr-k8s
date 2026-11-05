@@ -31,7 +31,7 @@ import (
 
 var (
 	collectorNames      = flag.String("collectors", "bgp,bfd", "Comma-separated collectors: bgp,bfd,evpn. EVPN is opt-in.")
-	scrapeTimeout       = flag.Duration("scrape-timeout", 8*time.Second, "Deadline for all FRR reads per scrape; keep below the scraper timeout.")
+	scrapeTimeout       = flag.Duration("scrape-timeout", 8*time.Second, "Deadline for authentication and FRR collection per scrape; keep below the scraper timeout.")
 	metricsPort         = flag.Uint("metrics-port", 9141, "Port to listen on for web interface.")
 	metricsBindAddress  = flag.String("metrics-bind-address", "0.0.0.0", "The address the metric endpoint binds to")
 	metricsPath         = flag.String("metrics-path", "/metrics", "Path under which to expose metrics.")

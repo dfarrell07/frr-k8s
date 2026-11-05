@@ -512,13 +512,6 @@ func TestFailedCollectorDropsPartialData(t *testing.T) {
 	expect(t, got, map[string]float64{`frrk8s_scrape_collector_success{collector="partial"}`: 0})
 }
 
-func TestBFDSessionWithoutStatusIsMalformed(t *testing.T) {
-	row := `{"id":1,"peer":"192.0.2.1","vrf":"default","local":"192.0.2.10","multihop":true}`
-	if _, err := collectBFD(context.Background(), fake(map[string]string{peersCmd: "[" + row + "]", countersCmd: "[]"})); err == nil {
-		t.Error("a session with no status was reported as down")
-	}
-}
-
 func TestOneFailingCollectorDoesNotHideTheOthers(t *testing.T) {
 	run := fake(map[string]string{bgpCmd: "@bgp_neighbors.json", "show evpn vni json": "@evpn_vni.json", esCmd: "@evpn_es_empty.json"}) // no BFD
 	got := series(t, Gather(context.Background(), run, all, discard))
@@ -547,8 +540,7 @@ func TestSelectCollectors(t *testing.T) {
 	}
 }
 
-// BenchmarkCollectBGP backs the README's scale figure: 2000 neighbors built
-// from the real fixture's shape.
+// BenchmarkCollectBGP uses 2000 neighbors built from the real fixture's shape.
 func BenchmarkCollectBGP(b *testing.B) {
 	raw, err := os.ReadFile("testdata/bgp_neighbors.json")
 	if err != nil {

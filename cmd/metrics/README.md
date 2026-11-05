@@ -63,7 +63,7 @@ a failed ES read also discards VNI data.
 
 ## Standalone authentication
 
-For direct remote scraping, require a trusted client certificate:
+To require a trusted client certificate for remote scrapes:
 
 ```sh
 ./frr-metrics --disable-metrics-auth --collectors=bgp,bfd,evpn \
