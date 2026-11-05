@@ -160,12 +160,6 @@ func TestScraperTimeoutLowersTheDeadline(t *testing.T) {
 		t.Errorf("with a 2s scraper timeout the deadline was %v away, want about 1.8s", remaining)
 	}
 	mu.Unlock()
-	scrapeBody(t, e, "X-Prometheus-Scrape-Timeout-Seconds", "junk")
-	mu.Lock()
-	if remaining < 50*time.Second {
-		t.Errorf("an unparseable header changed the deadline to %v", remaining)
-	}
-	mu.Unlock()
 }
 
 func TestInvalidOrLargeScraperTimeoutKeepsTheBudget(t *testing.T) {

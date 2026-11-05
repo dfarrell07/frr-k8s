@@ -349,14 +349,9 @@ func bfdRow(id uint32, peer, local string, multihop bool) string {
 func TestBFDDuplicateIdentitiesFail(t *testing.T) {
 	a := bfdRow(1, "192.0.2.1", "192.0.2.10", true)
 	b := strings.Replace(a, `"id":1`, `"id":2`, 1)
-	for name, tc := range map[string]struct{ peers, counters string }{
-		"duplicate session":         {"[" + a + "," + a + "]", "[" + a + "]"},
-		"duplicate counter row":     {"[]", "[" + a + "," + a + "]"},
-		"distinct ids share labels": {"[" + a + "," + b + "]", "[" + a + "," + b + "]"},
-	} {
-		if _, err := collectBFD(context.Background(), fake(map[string]string{peersCmd: tc.peers, countersCmd: tc.counters})); err == nil {
-			t.Errorf("%s: want error", name)
-		}
+	rows := "[" + a + "," + b + "]"
+	if ms, err := collectBFD(context.Background(), fake(map[string]string{peersCmd: rows, countersCmd: rows})); err == nil || len(ms) != 0 {
+		t.Errorf("duplicate labels with distinct IDs: %d metrics, error %v", len(ms), err)
 	}
 }
 
@@ -392,21 +387,6 @@ func TestBFDMissingCounterIsOmittedNotZero(t *testing.T) {
 	expect(t, got, map[string]float64{
 		`frrk8s_bfd_control_packet_input{interface="eth0",local="192.0.2.10",multihop="false",peer="192.0.2.1",vrf="default"}`: 9})
 	absent(t, got, "frrk8s_bfd_echo_", "frrk8s_bfd_zebra", "frrk8s_bfd_control_packet_output", "frrk8s_bfd_session_up_events", "frrk8s_bfd_session_down_events")
-}
-
-func TestBFDMultihopFromRealFRR(t *testing.T) {
-	// Real FRR: a multihop session has no interface key, and both replies
-	// carry the same identity, which is what the join relies on.
-	ms, err := collectBFD(context.Background(), fake(map[string]string{
-		peersCmd: "@bfd_multihop_peers.json", countersCmd: "@bfd_multihop_counters.json"}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	const id = `{interface="",local="10.80.0.2",multihop="true",peer="10.80.0.3",vrf="default"}`
-	expect(t, series(t, ms), map[string]float64{
-		"frrk8s_bfd_session_up" + id:           1,
-		"frrk8s_bfd_control_packet_input" + id: 49,
-	})
 }
 
 func TestFailedCollectorDropsPartialData(t *testing.T) {

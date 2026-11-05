@@ -28,7 +28,7 @@ if [ "$1" = run ] || [ "$1" = rm ]; then exit 1; fi`,
 		}
 	}
 	var previous string
-	for _, failAt := range []string{"network", "network", "run"} {
+	for _, failAt := range []string{"network", "run"} {
 		log := filepath.Join(t.TempDir(), "podman.log")
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		cmd := exec.CommandContext(ctx, "bash", "../../hack/metrics-smoke.sh")

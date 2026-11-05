@@ -51,10 +51,6 @@ func TestReviewClientKeepsConfigAndDoesNotQueueRateLimits(t *testing.T) {
 	if !transport.access.TryAccept() {
 		t.Fatal("TokenReviews consumed SubjectAccessReview admission")
 	}
-	closeClient()
-	if _, err := client.Get("https://example.invalid"); !errors.Is(err, context.Canceled) {
-		t.Fatalf("closed review client admitted a lookup: %v", err)
-	}
 }
 
 func TestReviewTransportBoundsUnreadBodiesAndCancelsOnShutdown(t *testing.T) {

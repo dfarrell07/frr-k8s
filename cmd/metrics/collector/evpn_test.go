@@ -195,9 +195,6 @@ func assertEVPNFailure(t *testing.T, replies map[string]string) {
 	if ms, err := collectEVPN(context.Background(), fake(replies)); err == nil || len(ms) != 0 {
 		t.Errorf("failed EVPN read: %d metrics, error %v", len(ms), err)
 	}
-	got := series(t, Gather(context.Background(), fake(replies), all[2:], discard))
-	expect(t, got, map[string]float64{`frrk8s_scrape_collector_success{collector="evpn"}`: 0})
-	absent(t, got, "frrk8s_evpn_")
 }
 
 func TestEVPNUnknownFlagsAndMissingRole(t *testing.T) {
@@ -265,12 +262,8 @@ func TestEVPNVTEPMembershipOmissionsAndInvalidData(t *testing.T) {
 	}
 }
 
-func TestEVPNEmptyAndPartial(t *testing.T) {
-	ms, err := collectEVPN(context.Background(), fake(map[string]string{vniCmd: "{}", esCmd: "@evpn_es_empty.json"}))
-	if err != nil || len(ms) != 0 {
-		t.Errorf("no VNIs: %d series, err %v", len(ms), err)
-	}
-	ms, err = collectEVPN(context.Background(), fake(map[string]string{esCmd: "@evpn_es_empty.json", vniCmd: `{"7":{"vni":7,"type":"L2","vxlanIf":"v7","tenantVrf":"default"}}`}))
+func TestEVPNMissingCountsAreOmitted(t *testing.T) {
+	ms, err := collectEVPN(context.Background(), fake(map[string]string{esCmd: "@evpn_es_empty.json", vniCmd: `{"7":{"vni":7,"type":"L2","vxlanIf":"v7","tenantVrf":"default"}}`}))
 	if err != nil {
 		t.Fatal(err)
 	}

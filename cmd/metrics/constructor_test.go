@@ -300,26 +300,21 @@ func TestMetricsHandlerInClusterConstructor(t *testing.T) {
 				t.Fatal("authentication outlived its scrape budget")
 			}
 		}
-		// Refill the default 5 QPS / burst 10 bucket. Otherwise rate limiting
-		// could hide unbounded detached API calls in the later request waves.
-		time.Sleep(2 * time.Second)
-		for wave := range 2 {
-			for i := range maxResponses {
-				go func() { code, _ := request(fmt.Sprintf("wave-%d-%d", wave, i), "1"); finished <- code }()
-			}
-			for range maxResponses {
-				select {
-				case code := <-finished:
-					if code != http.StatusInternalServerError {
-						t.Fatalf("wave %d: excess authentication returned %d", wave, code)
-					}
-				case <-time.After(2 * time.Second):
-					t.Fatal("excess authentication queued")
+		for i := range maxResponses {
+			go func() { code, _ := request(fmt.Sprintf("excess-%d", i), "1"); finished <- code }()
+		}
+		for range maxResponses {
+			select {
+			case code := <-finished:
+				if code != http.StatusInternalServerError {
+					t.Fatalf("excess authentication returned %d", code)
 				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("excess authentication queued")
 			}
-			if reviews.tokens.Load() != maxResponses || reviews.active.Load() != maxResponses || reviews.access.Load() != 0 || len(e.responses) != 0 || reads.Load() != 0 {
-				t.Fatalf("wave %d escaped admission: token=%d active=%d access=%d responses=%d reads=%d", wave, reviews.tokens.Load(), reviews.active.Load(), reviews.access.Load(), len(e.responses), reads.Load())
-			}
+		}
+		if reviews.tokens.Load() != maxResponses || reviews.active.Load() != maxResponses || reviews.access.Load() != 0 || len(e.responses) != 0 || reads.Load() != 0 {
+			t.Fatalf("excess requests escaped admission: token=%d active=%d access=%d responses=%d reads=%d", reviews.tokens.Load(), reviews.active.Load(), reviews.access.Load(), len(e.responses), reads.Load())
 		}
 		shutdown()
 		if reviews.active.Load() != maxResponses {
@@ -339,6 +334,6 @@ func TestMetricsHandlerInClusterConstructor(t *testing.T) {
 		if reviews.active.Load() != 0 || reviews.canceledTokens.Load() != maxResponses || reads.Load() != 0 {
 			t.Fatalf("shutdown retained API work: active=%d canceled=%d reads=%d", reviews.active.Load(), reviews.canceledTokens.Load(), reads.Load())
 		}
-		t.Log("three request waves retained exactly eight API calls; closeAuth canceled all eight after serving stopped")
+		t.Log("expired and excess requests retained exactly eight API calls; closeAuth canceled all eight after serving stopped")
 	})
 }

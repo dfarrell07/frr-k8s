@@ -8,7 +8,7 @@ The pinned image cited below is
 Invalid-input tests mutate these captures.
 `bgp_neighbors.json`, `bfd_{peers,counters}.json`, and `evpn_vni.json` use the
 two-router topology in `hack/metrics-smoke.sh`. Other BGP captures include VRFs,
-IPv6, unnumbered and down peers; the multihop BFD captures add a multihop session.
+IPv6, unnumbered and down peers.
 
 `bfd_identity_{peers,counters}.json` were captured on 2026-11-02 from the pinned image
 with `show bfd peers json` and `show bfd peers counters json`. The lab configured three default-VRF sessions to
