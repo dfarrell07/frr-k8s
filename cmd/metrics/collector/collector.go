@@ -63,7 +63,7 @@ func Select(list string) ([]Collector, error) {
 }
 
 var (
-	successDesc  = desc("scrape_collector_success", "1 if the collector read and parsed FRR completely, 0 if it emitted nothing", "collector")
+	successDesc  = desc("scrape_collector_success", "1 if the collector read and parsed FRR completely, 0 on collection failure", "collector")
 	durationDesc = desc("scrape_collector_duration_seconds", "Time the collector spent reading FRR", "collector")
 )
 
