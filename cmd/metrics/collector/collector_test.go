@@ -438,7 +438,7 @@ func BenchmarkCollectBGP(b *testing.B) {
 	}
 	peers := map[string]json.RawMessage{}
 	for i := 0; i < 2000; i++ {
-		peers[fmt.Sprintf("10.%d.%d.%d", i/65536%256, i/256%256, i%256+1)] = fixture["default"]["10.78.0.3"]
+		peers[fmt.Sprintf("10.0.%d.%d", i/254, i%254+1)] = fixture["default"]["10.78.0.3"]
 	}
 	big, _ := json.Marshal(map[string]any{"default": peers})
 	run := func(context.Context, string) ([]byte, error) { return big, nil }
