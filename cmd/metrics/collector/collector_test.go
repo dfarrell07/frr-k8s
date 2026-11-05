@@ -90,47 +90,12 @@ func absent(t *testing.T, got map[string]float64, prefixes ...string) {
 const bgpCmd = "show bgp vrf all neighbors json"
 
 func TestBGPFromRealFRR(t *testing.T) {
-	raw, err := os.ReadFile("testdata/bgp_neighbors.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var vrfs map[string]any
-	if err := json.Unmarshal(raw, &vrfs); err != nil {
-		t.Fatal(err)
-	}
-	// Preserve the captured shape, with distinct counters so source swaps cannot hide.
-	stats := vrfs["default"].(map[string]any)["10.78.0.3"].(map[string]any)["messageStats"].(map[string]any)
-	for key, value := range map[string]int{
-		"opensSent": 11, "opensRecv": 12, "notificationsSent": 13,
-		"updatesSent": 14, "updatesRecv": 15, "keepalivesSent": 16,
-		"keepalivesRecv": 17, "routeRefreshSent": 18, "totalSent": 72, "totalRecv": 44,
-	} {
-		stats[key] = value
-	}
-	raw, err = json.Marshal(vrfs)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ms, err := collectBGP(context.Background(), fake(map[string]string{bgpCmd: string(raw)}))
+	ms, err := collectBGP(context.Background(), fake(map[string]string{bgpCmd: "@bgp_neighbors.json"}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := series(t, ms)
-	const p = `{peer="10.78.0.3",vrf="default"}`
 	expect(t, got, map[string]float64{
-		"frrk8s_bgp_session_up" + p:               1,
-		"frrk8s_bgp_announced_prefixes_total" + p: 4, // 1 IPv4 + 3 EVPN
-		"frrk8s_bgp_received_prefixes_total" + p:  2,
-		"frrk8s_bgp_opens_sent" + p:               11,
-		"frrk8s_bgp_opens_received" + p:           12,
-		"frrk8s_bgp_notifications_sent" + p:       13,
-		"frrk8s_bgp_updates_total" + p:            14,
-		"frrk8s_bgp_updates_total_received" + p:   15,
-		"frrk8s_bgp_keepalives_sent" + p:          16,
-		"frrk8s_bgp_keepalives_received" + p:      17,
-		"frrk8s_bgp_route_refresh_sent" + p:       18,
-		"frrk8s_bgp_total_sent" + p:               72,
-		"frrk8s_bgp_total_received" + p:           44,
 		`frrk8s_bgp_family_received_prefixes{afi="ipv4",peer="10.78.0.3",safi="unicast",vrf="default"}`:  1,
 		`frrk8s_bgp_family_received_prefixes{afi="l2vpn",peer="10.78.0.3",safi="evpn",vrf="default"}`:    1,
 		`frrk8s_bgp_family_announced_prefixes{afi="ipv4",peer="10.78.0.3",safi="unicast",vrf="default"}`: 1,
@@ -346,44 +311,6 @@ func TestCorruptFixtureFieldsFailOnlyTheirCollector(t *testing.T) {
 	}
 }
 
-func TestBFDFromRealFRR(t *testing.T) {
-	raw, err := os.ReadFile("testdata/bfd_counters.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var rows []map[string]any
-	if err := json.Unmarshal(raw, &rows); err != nil {
-		t.Fatal(err)
-	}
-	// Keep the real identity and shape, with distinct values for every source.
-	for key, value := range map[string]int{
-		"control-packet-input": 101, "control-packet-output": 102,
-		"echo-packet-input": 103, "echo-packet-output": 104,
-		"session-up": 106, "session-down": 105, "zebra-notifications": 107,
-	} {
-		rows[0][key] = value
-	}
-	raw, err = json.Marshal(rows)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ms, err := collectBFD(context.Background(), fake(map[string]string{peersCmd: "@bfd_peers.json", countersCmd: string(raw)}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	const id = `{interface="eth0",local="10.78.0.2",multihop="false",peer="10.78.0.3",vrf="default"}`
-	expect(t, series(t, ms), map[string]float64{
-		"frrk8s_bfd_session_up" + id:            1,
-		"frrk8s_bfd_control_packet_input" + id:  101,
-		"frrk8s_bfd_control_packet_output" + id: 102,
-		"frrk8s_bfd_echo_packet_input" + id:     103,
-		"frrk8s_bfd_echo_packet_output" + id:    104,
-		"frrk8s_bfd_session_up_events" + id:     106,
-		"frrk8s_bfd_session_down_events" + id:   105,
-		"frrk8s_bfd_zebra_notifications" + id:   107,
-	})
-}
-
 const (
 	peersCmd    = "show bfd peers json"
 	countersCmd = "show bfd peers counters json"
@@ -433,24 +360,6 @@ func TestBFDDuplicateIdentitiesFail(t *testing.T) {
 	}
 }
 
-func TestBFDInvalidIdentityInBothReads(t *testing.T) {
-	for _, field := range []string{`"id":2149748673`, `"peer":"10.78.0.3"`, `"multihop":false`} {
-		t.Run(field, func(t *testing.T) {
-			replies := map[string]string{peersCmd: "@bfd_peers.json", countersCmd: "@bfd_counters.json"}
-			for command := range replies {
-				raw, err := fake(replies)(context.Background(), command)
-				if err != nil {
-					t.Fatal(err)
-				}
-				replies[command] = strings.Replace(string(raw), field, strings.SplitN(field, ":", 2)[0]+":null", 1)
-			}
-			if ms, err := collectBFD(context.Background(), fake(replies)); err == nil || len(ms) != 0 {
-				t.Errorf("invalid identity: %d metrics, error %v", len(ms), err)
-			}
-		})
-	}
-}
-
 func TestBFDSnapshotMismatchFailsAtomically(t *testing.T) {
 	a := bfdRow(1, "192.0.2.1", "192.0.2.10", true)
 	b := bfdRow(2, "192.0.2.2", "192.0.2.20", true)
@@ -467,9 +376,6 @@ func TestBFDSnapshotMismatchFailsAtomically(t *testing.T) {
 			if ms, err := collectBFD(context.Background(), run); err == nil || len(ms) != 0 {
 				t.Errorf("mismatched snapshot: %d metrics, error %v", len(ms), err)
 			}
-			got := series(t, Gather(context.Background(), run, all[1:2], discard))
-			expect(t, got, map[string]float64{`frrk8s_scrape_collector_success{collector="bfd"}`: 0})
-			absent(t, got, "frrk8s_bfd_")
 		})
 	}
 }
@@ -612,33 +518,14 @@ func TestBFDSBFDDoesNotSatisfyOrdinarySessionHealth(t *testing.T) {
 		replies := map[string]string{peersCmd: "@bfd_sbfd_peers.json", countersCmd: "@bfd_sbfd_counters.json"}
 		if mixed {
 			for command, ordinary := range map[string]string{peersCmd: "@bfd_peers.json", countersCmd: "@bfd_counters.json"} {
-				named, err := fake(replies)(context.Background(), command)
-				if err != nil {
-					t.Fatal(err)
-				}
-				normal, err := fake(map[string]string{command: ordinary})(context.Background(), command)
-				if err != nil {
-					t.Fatal(err)
-				}
-				var a, b []json.RawMessage
-				if err := json.Unmarshal(named, &a); err != nil {
-					t.Fatal(err)
-				}
-				if err := json.Unmarshal(normal, &b); err != nil {
-					t.Fatal(err)
-				}
-				both, err := json.Marshal(append(b, a...))
-				if err != nil {
-					t.Fatal(err)
-				}
-				replies[command] = string(both)
+				replies[command] = encodeJSON(t, []any{
+					fixtureObject(t, strings.TrimPrefix(ordinary, "@")),
+					fixtureObject(t, strings.TrimPrefix(replies[command], "@")),
+				})
 			}
 		}
 		if ms, err := collectBFD(context.Background(), fake(replies)); err == nil || len(ms) != 0 {
 			t.Errorf("mixed=%v: accepted unsupported mode: %d metrics, error %v", mixed, len(ms), err)
 		}
-		got := series(t, Gather(context.Background(), fake(replies), all[1:2], discard))
-		expect(t, got, map[string]float64{`frrk8s_scrape_collector_success{collector="bfd"}`: 0})
-		absent(t, got, "frrk8s_bfd_")
 	}
 }

@@ -58,8 +58,8 @@ func TestVtyshIgnoresLongStderrOnSuccess(t *testing.T) {
 }
 
 func TestVtyshRejectsOversizedOutput(t *testing.T) {
-	path := script(t, `head -c 5000 /dev/zero | tr '\0' x`)
-	if _, err := (Vtysh{Path: path, MaxOutput: 1000}).Run(context.Background(), bgpCmd); err == nil {
+	path := script(t, fmt.Sprintf("head -c %d /dev/zero", DefaultMaxOutput+1))
+	if _, err := (Vtysh{Path: path}).Run(context.Background(), bgpCmd); err == nil {
 		t.Error("oversized output accepted")
 	}
 }

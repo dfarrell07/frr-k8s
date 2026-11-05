@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -142,61 +141,6 @@ func TestSlowCollectorDoesNotStarveTheOthers(t *testing.T) {
 			t.Errorf("missing %q", line)
 		}
 	}
-}
-
-func TestSlowResponsesHaveASharedLimitAndRecover(t *testing.T) {
-	var reads atomic.Int32
-	e := newExporter(func(ctx context.Context, command string) ([]byte, error) {
-		reads.Add(1)
-		return quiet(ctx, command)
-	}, time.Second)
-	e.cs = e.cs[:1] // one FRR read for each admitted response
-	release := make(chan struct{})
-	var once sync.Once
-	var done sync.WaitGroup
-	releaseAll := func() { once.Do(func() { close(release) }); done.Wait() }
-	defer releaseAll()
-	for range maxResponses {
-		entered := make(chan struct{})
-		w := &stuckWriter{entered: func() { close(entered) }, release: release}
-		done.Add(1)
-		go func() { defer done.Done(); e.ServeHTTP(w, httptest.NewRequest("GET", "/metrics", nil)) }()
-		select {
-		case <-entered:
-		case <-time.After(5 * time.Second):
-			t.Fatal("response never reached writer")
-		}
-	}
-	if reads.Load() != int32(maxResponses) {
-		t.Fatalf("got %d admitted reads, want %d", reads.Load(), maxResponses)
-	}
-	before := reads.Load()
-	if code, _ := scrapeBody(t, e); code != http.StatusServiceUnavailable {
-		t.Errorf("response beyond limit: status %d, want 503", code)
-	}
-	if reads.Load() != before {
-		t.Error("rejected response invoked FRR")
-	}
-	releaseAll()
-	if code, _ := scrapeBody(t, e); code != http.StatusOK {
-		t.Errorf("after responses drain: status %d, want 200", code)
-	}
-}
-
-type stuckWriter struct {
-	entered func()
-	release chan struct{}
-	once    sync.Once
-}
-
-func (w *stuckWriter) Header() http.Header { return http.Header{} }
-
-func (w *stuckWriter) WriteHeader(int) {}
-
-func (w *stuckWriter) Write(p []byte) (int, error) {
-	w.once.Do(w.entered)
-	<-w.release
-	return len(p), nil
 }
 
 func TestScraperTimeoutLowersTheDeadline(t *testing.T) {

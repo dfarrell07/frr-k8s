@@ -22,25 +22,8 @@ var errReviewsBusy = errors.New("too many Kubernetes review requests")
 func newReviewClient(config *rest.Config) (*rest.Config, *http.Client, func(), error) {
 	config = rest.CopyConfig(config)
 	ctx, cancel := context.WithCancel(context.Background())
-	newLimiter := func() flowcontrol.RateLimiter {
-		if config.RateLimiter != nil {
-			return config.RateLimiter
-		}
-		qps, burst := config.QPS, config.Burst
-		if qps == 0 {
-			qps = rest.DefaultQPS
-		}
-		if burst == 0 {
-			burst = rest.DefaultBurst
-		}
-		if qps > 0 {
-			return flowcontrol.NewTokenBucketRateLimiter(qps, burst)
-		}
-		return nil
-	}
-	// Preserve the separate typed clients' buckets, but check them without
+	// Preserve the separate typed clients' default buckets, but check them without
 	// queuing detached lookups in client-go before they reach the transport.
-	tokens, access := newLimiter(), newLimiter()
 	config.QPS, config.RateLimiter = -1, nil
 	client, err := rest.HTTPClientFor(config)
 	if err != nil {
@@ -53,7 +36,11 @@ func newReviewClient(config *rest.Config) (*rest.Config, *http.Client, func(), e
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	transport := &reviewTransport{base: base, ctx: ctx, cancel: cancel, slots: make(chan struct{}, maxResponses), tokens: tokens, access: access}
+	transport := &reviewTransport{
+		base: base, ctx: ctx, cancel: cancel, slots: make(chan struct{}, maxResponses),
+		tokens: flowcontrol.NewTokenBucketRateLimiter(rest.DefaultQPS, rest.DefaultBurst),
+		access: flowcontrol.NewTokenBucketRateLimiter(rest.DefaultQPS, rest.DefaultBurst),
+	}
 	bounded.Transport = transport
 	return config, &bounded, transport.close, nil
 }
@@ -66,7 +53,6 @@ type reviewTransport struct {
 	tokens flowcontrol.RateLimiter
 	access flowcontrol.RateLimiter
 	mu     sync.Mutex
-	closed bool
 	active sync.WaitGroup
 }
 
@@ -75,7 +61,7 @@ func (t *reviewTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 	t.mu.Lock()
-	if t.closed {
+	if t.ctx.Err() != nil {
 		t.mu.Unlock()
 		return nil, context.Canceled
 	}
@@ -89,7 +75,7 @@ func (t *reviewTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if strings.HasSuffix(req.URL.Path, "/tokenreviews") {
 		limiter = t.tokens
 	}
-	if limiter != nil && !limiter.TryAccept() {
+	if !limiter.TryAccept() {
 		<-t.slots
 		t.mu.Unlock()
 		return nil, errReviewsBusy
@@ -122,7 +108,6 @@ func (t *reviewTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func (t *reviewTransport) close() {
 	t.mu.Lock()
-	t.closed = true
 	t.cancel()
 	t.mu.Unlock()
 	t.active.Wait()

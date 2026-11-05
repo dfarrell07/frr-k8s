@@ -25,7 +25,7 @@ func TestForContextRejectsPartialKeyPair(t *testing.T) {
 			t.Fatal("partial key pair silently generated a self-signed certificate")
 		}
 	}
-	cfg, err := For(opt, "", "")
+	cfg, err := ForContext(t.Context(), opt, "", "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

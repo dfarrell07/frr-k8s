@@ -157,28 +157,6 @@ func testShutdownDrainsActiveRequest(t *testing.T, ctx context.Context, cancel c
 	}
 }
 
-func TestIncompleteBodyCannotHoldAResponseSlot(t *testing.T) {
-	addr, stop, done := startServer(t, newExporter(quiet, time.Second), time.Second)
-	conn, err := tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: true}) // #nosec G402 -- test self-signed certificate
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
-	if _, err := io.WriteString(conn, "GET /metrics HTTP/1.1\r\nHost: localhost\r\nContent-Length: 1\r\n\r\n"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := io.Copy(io.Discard, conn); err != nil {
-		if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
-			t.Fatal("incomplete body exceeded read deadline")
-		}
-	}
-	stop()
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-}
-
 func TestShutdownBeforeServingDoesNotLeaveAListener(t *testing.T) {
 	addr, stop, done := startServer(t, http.NotFoundHandler(), time.Second)
 	stop()

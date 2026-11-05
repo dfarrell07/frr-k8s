@@ -21,8 +21,7 @@ const killWaitTime = time.Second
 // pipe. Standard error is kept apart from standard output, which FRR's JSON
 // must not be mixed with, and only adds context to an error.
 type Vtysh struct {
-	Path      string // for example /usr/bin/vtysh
-	MaxOutput int    // 0 means DefaultMaxOutput
+	Path string // for example /usr/bin/vtysh
 }
 
 // Run executes a read with its caller's deadline.
@@ -52,11 +51,7 @@ func (v Vtysh) Run(ctx context.Context, command string) ([]byte, error) {
 	}
 	cmd := exec.CommandContext(ctx, path, args...) // #nosec G204 -- fixed commands from this package
 	cmd.WaitDelay = killWaitTime
-	limit := v.MaxOutput
-	if limit == 0 {
-		limit = DefaultMaxOutput
-	}
-	out, errOut := &limitBuffer{max: limit}, &limitBuffer{max: 4096, truncate: true}
+	out, errOut := &limitBuffer{max: DefaultMaxOutput}, &limitBuffer{max: 4096, truncate: true}
 	cmd.Stdout, cmd.Stderr = out, errOut
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {

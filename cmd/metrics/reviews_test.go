@@ -18,6 +18,7 @@ import (
 
 	"github.com/go-logr/logr"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/flowcontrol"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 )
 
@@ -205,11 +206,14 @@ func TestCachedTokenReviewsRemainBoundedAcrossRequestDeadlines(t *testing.T) {
 	defer api.Close()
 	defer releaseAPI()
 	// Avoid rate throttling here so the independent transport limit is exercised.
-	config, client, closeClient, err := newReviewClient(&rest.Config{Host: api.URL, QPS: 1000, Burst: 100})
+	config, client, closeClient, err := newReviewClient(&rest.Config{Host: api.URL})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer closeClient()
+	transport := client.Transport.(*reviewTransport)
+	transport.tokens = flowcontrol.NewFakeAlwaysRateLimiter()
+	transport.access = flowcontrol.NewFakeAlwaysRateLimiter()
 	filter, err := filters.WithAuthenticationAndAuthorization(config, client)
 	if err != nil {
 		t.Fatal(err)

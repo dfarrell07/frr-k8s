@@ -13,12 +13,6 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
-// For applies TLS options with a process-lifetime certificate watcher. Callers
-// owning a server context should use ForContext to handle watcher failures.
-func For(tlsOpt func(*tls.Config), certFile, keyFile string) (*tls.Config, error) {
-	return ForContext(context.Background(), tlsOpt, certFile, keyFile, nil)
-}
-
 // ForContext applies TLS options and watches an explicit key pair until ctx
 // ends. A watcher failure is reported to onWatcherError, or logged when nil.
 // Without a key pair, it generates a self-signed certificate once.

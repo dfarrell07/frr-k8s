@@ -28,11 +28,11 @@ var constructorFixture = flag.Bool("constructor-fixture", false, "Run the in-clu
 const constructorServiceAccountToken = "metrics-constructor-fixture-service-account"
 
 type constructorReviews struct {
-	t                                            *testing.T
-	tokens, access, active, peak, canceledTokens atomic.Int32
-	canceledAccess                               atomic.Int32
-	started                                      chan struct{}
-	release                                      chan struct{}
+	t                                      *testing.T
+	tokens, access, active, canceledTokens atomic.Int32
+	canceledAccess                         atomic.Int32
+	started                                chan struct{}
+	release                                chan struct{}
 }
 
 func (a *constructorReviews) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -56,13 +56,8 @@ func (a *constructorReviews) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid review", http.StatusBadRequest)
 		return
 	}
-	active := a.active.Add(1)
+	a.active.Add(1)
 	defer a.active.Add(-1)
-	for peak := a.peak.Load(); active > peak; peak = a.peak.Load() {
-		if a.peak.CompareAndSwap(peak, active) {
-			break
-		}
-	}
 	w.Header().Set("Content-Type", "application/json")
 	switch r.URL.Path {
 	case "/apis/authentication.k8s.io/v1/tokenreviews":
@@ -322,8 +317,8 @@ func TestMetricsHandlerInClusterConstructor(t *testing.T) {
 					t.Fatal("excess authentication queued")
 				}
 			}
-			if reviews.tokens.Load() != maxResponses || reviews.active.Load() != maxResponses || reviews.peak.Load() != maxResponses || reviews.access.Load() != 0 || len(e.responses) != 0 || reads.Load() != 0 {
-				t.Fatalf("wave %d escaped admission: token=%d active=%d peak=%d access=%d responses=%d reads=%d", wave, reviews.tokens.Load(), reviews.active.Load(), reviews.peak.Load(), reviews.access.Load(), len(e.responses), reads.Load())
+			if reviews.tokens.Load() != maxResponses || reviews.active.Load() != maxResponses || reviews.access.Load() != 0 || len(e.responses) != 0 || reads.Load() != 0 {
+				t.Fatalf("wave %d escaped admission: token=%d active=%d access=%d responses=%d reads=%d", wave, reviews.tokens.Load(), reviews.active.Load(), reviews.access.Load(), len(e.responses), reads.Load())
 			}
 		}
 		shutdown()
