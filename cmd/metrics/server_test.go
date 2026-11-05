@@ -103,9 +103,22 @@ func TestShutdownDrainsActiveRequest(t *testing.T) {
 func testShutdownDrainsActiveRequest(t *testing.T, ctx context.Context, cancel context.CancelFunc, cause error) {
 	t.Helper()
 	started, release := make(chan struct{}), make(chan struct{})
+	shutdownStarted := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
 	addr, _, done := startServerContext(t, ctx, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		server := r.Context().Value(http.ServerContextKey).(*http.Server)
+		server.RegisterOnShutdown(func() { close(shutdownStarted) })
 		close(started)
-		<-release
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
 		if r.Context().Err() != nil {
 			t.Error("canceled during grace period")
 		}
@@ -130,6 +143,11 @@ func testShutdownDrainsActiveRequest(t *testing.T, ctx context.Context, cancel c
 		t.Fatal("request did not start")
 	}
 	cancel()
+	select {
+	case <-shutdownStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown did not start")
+	}
 	close(release)
 	if got := <-response; got != "drained" {
 		t.Fatal(got)
