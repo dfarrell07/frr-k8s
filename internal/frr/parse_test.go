@@ -26,6 +26,27 @@ var expectedStats = MessageStats{
 	TotalReceived:      10,
 }
 
+func TestNeighborFamilyPrefixCounters(t *testing.T) {
+	input := `{"net1":{"addressFamilyInfo":{
+		"ipv4Unicast":{"sentPrefixCounter":0},
+		"l2VpnEvpn":{"acceptedPrefixCounter":7},
+		"unknownFamily":{"sentPrefixCounter":11,"acceptedPrefixCounter":13}
+	}}}`
+	n, err := ParseNeighbour(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n.ID != "net1" || n.PrefixSent != 11 || n.PrefixReceived != 20 {
+		t.Fatalf("unexpected identity or legacy totals: %+v", n)
+	}
+	v4, evpn := n.Families["ipv4Unicast"], n.Families["l2VpnEvpn"]
+	if len(n.Families) != 3 || v4.SentPrefixCounter == nil || *v4.SentPrefixCounter != 0 ||
+		v4.AcceptedPrefixCounter != nil || evpn.SentPrefixCounter != nil ||
+		evpn.AcceptedPrefixCounter == nil || *evpn.AcceptedPrefixCounter != 7 {
+		t.Fatalf("family counters lost presence or values: %+v", n.Families)
+	}
+}
+
 func TestNeighbour(t *testing.T) {
 	sample := `{
     "%s":{
@@ -1044,5 +1065,81 @@ func TestVRFs(t *testing.T) {
 	expected := []string{"default", "red"}
 	if !cmp.Equal(parsed, expected) {
 		t.Fatalf("unexpected vrf list: %s", cmp.Diff(parsed, expected))
+	}
+}
+
+// Adapted from FRR 10.4.3's show evpn vni json; distinct counts catch field swaps.
+const evpnVNIs = `{
+"10100":{"vni":10100,"type":"L2","vxlanIf":"vxlan10100","numMacs":2,"numArpNd":0,"numRemoteVteps":1,"tenantVrf":"default","remoteVteps":["10.78.0.3"]},
+"50001":{"vni":50001,"vxlanIf":"vxlan50001","numMacs":0,"numArpNd":0,"numRemoteVteps":"n/a","type":"L3","tenantVrf":"red"}}
+`
+
+func TestEVPNVNIs(t *testing.T) {
+	zero, macs, remote := uint64(0), uint64(2), uint64(1)
+	expected := []EVPNVNI{
+		{VNI: 10100, Type: "L2", Interface: "vxlan10100", VRF: "default", MACs: &macs, Neighbors: &zero, RemoteVTEPs: &remote},
+		{VNI: 50001, Type: "L3", Interface: "vxlan50001", VRF: "red", MACs: &zero, Neighbors: &zero},
+	}
+	for _, out := range []string{evpnVNIs, strings.Replace(evpnVNIs, `"numRemoteVteps":"n/a"`, `"numRemoteVteps":1`, 1)} {
+		vnis, err := ParseEVPNVNIs(out)
+		if err != nil {
+			t.Fatalf("Failed to parse %s", err)
+		}
+		sort.Slice(vnis, func(i, j int) bool {
+			return vnis[i].VNI < vnis[j].VNI
+		})
+		if !cmp.Equal(expected, vnis) {
+			t.Fatal("unexpected EVPN VNIs (-want +got)\n", cmp.Diff(expected, vnis))
+		}
+	}
+}
+
+func TestEVPNVNIsEmptyAndFailures(t *testing.T) {
+	for _, tt := range []struct {
+		name, out string
+		success   bool
+	}{
+		{name: "empty", out: "{}", success: true},
+		{name: "null", out: "null"},
+		{name: "malformed", out: "{"},
+		{name: "wrong shape", out: "[]"},
+		{name: "key mismatch", out: strings.Replace(evpnVNIs, `"vni":10100`, `"vni":10101`, 1)},
+		{name: "zero VNI", out: strings.ReplaceAll(evpnVNIs, "10100", "0")},
+		{name: "invalid VNI", out: strings.ReplaceAll(evpnVNIs, "10100", "16777216")},
+		{name: "invalid type", out: strings.Replace(evpnVNIs, `"L2"`, `"unknown"`, 1)},
+		{name: "missing interface", out: strings.Replace(evpnVNIs, `"vxlanIf":"vxlan10100",`, "", 1)},
+		{name: "missing VRF", out: strings.Replace(evpnVNIs, `"tenantVrf":"default",`, "", 1)},
+		{name: "negative MACs", out: strings.Replace(evpnVNIs, `"numMacs":2`, `"numMacs":-1`, 1)},
+		{name: "invalid neighbors", out: strings.Replace(evpnVNIs, `"numArpNd":0`, `"numArpNd":"bad"`, 1)},
+		{name: "invalid remote count", out: strings.Replace(evpnVNIs, `"numRemoteVteps":1`, `"numRemoteVteps":"n/a"`, 1)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			vnis, err := ParseEVPNVNIs(tt.out)
+			if tt.success {
+				if err != nil || len(vnis) != 0 {
+					t.Fatalf("expected empty inventory, got %v, error %v", vnis, err)
+				}
+				return
+			}
+			if err == nil || vnis != nil {
+				t.Fatalf("expected parse failure without VNIs, got %v, error %v", vnis, err)
+			}
+		})
+	}
+}
+
+func TestEVPNVNIsMissingCounts(t *testing.T) {
+	for _, vniType := range []string{"L2", "L3"} {
+		for _, counts := range []string{"", `,"numMacs":null,"numArpNd":null,"numRemoteVteps":null`} {
+			out := `{"100":{"vni":100,"type":"` + vniType + `","vxlanIf":"vxlan100","tenantVrf":"default"` + counts + `}}`
+			vnis, err := ParseEVPNVNIs(out)
+			if err != nil {
+				t.Fatalf("Failed to parse %s", err)
+			}
+			expected := []EVPNVNI{{VNI: 100, Type: vniType, Interface: "vxlan100", VRF: "default"}}
+			if !cmp.Equal(expected, vnis) {
+				t.Fatal("unexpected EVPN VNIs (-want +got)\n", cmp.Diff(expected, vnis))
+			}
+		}
 	}
 }
