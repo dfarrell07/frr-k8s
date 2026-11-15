@@ -28,6 +28,7 @@ func TestScrapeFailuresAndRecovery(t *testing.T) {
 		{"bfd counter VRFs", "bfd", "show bgp vrf all json", 2, true},
 		{"bfd counters", "bfd", "show bfd vrf default peers counters json", 1, true},
 		{"evpn VNIs", "evpn", "show evpn vni json", 1, false},
+		{"es segments", "es", "show evpn es detail json", 1, false},
 	} {
 		for _, failure := range []string{"command", "parse"} {
 			t.Run(tt.name+"/"+failure, func(t *testing.T) {
@@ -78,6 +79,7 @@ func TestScrapeEmptyInventory(t *testing.T) {
 		{"bgp no neighbors", "bgp", "show bgp vrf default neighbors json", "{}"},
 		{"bfd no VRFs", "bfd", "show bgp vrf all json", "{}"},
 		{"bfd no peers", "bfd", "", "[]"},
+		{"es no segments", "es", "show evpn es detail json", "[]"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cli := func(command string) (string, error) {
@@ -97,14 +99,36 @@ func TestScrapeEmptyInventory(t *testing.T) {
 
 func TestScrapeJointRegistration(t *testing.T) {
 	r := prometheus.NewPedanticRegistry()
-	for _, name := range []string{"bgp", "bfd", "evpn"} {
+	for _, name := range []string{"bgp", "bfd", "evpn", "es"} {
 		if err := r.Register(scrapeCollector(name, scrapeCLI)); err != nil {
 			t.Fatalf("registering %s: %v", name, err)
 		}
 	}
-	expected := scrapeSuccessText("bfd", 1) + "frrk8s_scrape_success{collector=\"bgp\"} 1\nfrrk8s_scrape_success{collector=\"evpn\"} 1\n"
+	expected := scrapeSuccessText("bfd", 1) + "frrk8s_scrape_success{collector=\"bgp\"} 1\nfrrk8s_scrape_success{collector=\"es\"} 1\nfrrk8s_scrape_success{collector=\"evpn\"} 1\n"
 	if err := testutil.GatherAndCompare(r, strings.NewReader(expected), "frrk8s_scrape_success"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// ES and VNI reads are separate collectors, so an ES failure leaves VNIs intact.
+func TestScrapeESFailureKeepsEVPN(t *testing.T) {
+	cli := func(command string) (string, error) {
+		if command == "show evpn es detail json" {
+			return "", errors.New("read failed")
+		}
+		return scrapeCLI(command)
+	}
+	r := prometheus.NewPedanticRegistry()
+	r.MustRegister(scrapeCollector("evpn", cli), scrapeCollector("es", cli))
+	expected := scrapeSuccessText("es", 0) + "frrk8s_scrape_success{collector=\"evpn\"} 1\n"
+	if err := testutil.GatherAndCompare(r, strings.NewReader(expected), "frrk8s_scrape_success"); err != nil {
+		t.Fatal(err)
+	}
+	if err := testutil.GatherAndCompare(r, strings.NewReader(""), "frrk8s_evpn_es_oper_up", "frrk8s_evpn_es_df"); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := testutil.GatherAndCount(r, "frrk8s_evpn_vni_info"); err != nil || n != 2 {
+		t.Fatalf("got %d VNI series (%v), want 2", n, err)
 	}
 }
 
@@ -121,6 +145,10 @@ func scrapeCollector(name string, cli vtysh.Cli) prometheus.Collector {
 		return c
 	case "evpn":
 		c := NewEVPN(l).(*evpn)
+		c.frrCli = cli
+		return c
+	case "es":
+		c := NewES(l).(*es)
 		c.frrCli = cli
 		return c
 	default:
@@ -140,6 +168,8 @@ func scrapeCLI(command string) (string, error) {
 		return peersCountersIPv4, nil
 	case "show evpn vni json":
 		return evpnCapture, nil
+	case "show evpn es detail json":
+		return esCapture, nil
 	default:
 		return "", fmt.Errorf("unexpected command %q", command)
 	}
