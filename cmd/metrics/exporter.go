@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	stdlog "log"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -72,7 +73,7 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Addr:        fmt.Sprintf("%s:%d", *metricsBindAddress, *metricsPort),
+		Addr:        metricsAddress(*metricsBindAddress, *metricsPort),
 		ReadTimeout: 3 * time.Second,
 		Handler:     mux,
 		TLSConfig:   tlsCfg,
@@ -84,6 +85,13 @@ func main() {
 		level.Error(logger).Log("error", err)
 		os.Exit(1)
 	}
+}
+
+func metricsAddress(host string, port uint) string {
+	if len(host) >= 2 && host[0] == '[' && host[len(host)-1] == ']' {
+		host = host[1 : len(host)-1]
+	}
+	return net.JoinHostPort(host, fmt.Sprint(port))
 }
 
 func newMetricsHandler(disableAuth bool) (http.Handler, error) {
