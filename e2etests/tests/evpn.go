@@ -167,6 +167,8 @@ var _ = ginkgo.Describe("EVPN sessions", func() {
 						podMetrics, err := forPod(promPod, pod)
 						g.Expect(err).NotTo(HaveOccurred())
 						g.Expect(metrics.ValidateGaugeValue(1, "frrk8s_scrape_success", map[string]string{"collector": "evpn"}, podMetrics)).To(Succeed())
+						// No Ethernet segment is configured, so this proves only that the ES read parses.
+						g.Expect(metrics.ValidateGaugeValue(1, "frrk8s_scrape_success", map[string]string{"collector": "es"}, podMetrics)).To(Succeed())
 						podExec := executor.ForPod(pod.Namespace, pod.Name, k8s.FRRContainerName)
 						// Summary counters independently check the neighbor-derived gauges.
 						out, err := podExec.Exec("vtysh", "-c", "show bgp vrf default summary json")

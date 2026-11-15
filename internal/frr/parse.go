@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 
@@ -153,6 +155,21 @@ type FRREVPNVNI struct {
 	// L3 VNIs report "n/a" instead of a numeric remote-VTEP count.
 	RemoteVTEPs json.RawMessage `json:"numRemoteVteps"`
 }
+
+type EVPNES struct {
+	ESI    string
+	OperUp bool
+	DF     *bool
+}
+
+type FRREVPNES struct {
+	ESI          string   `json:"esi"`
+	Flags        []string `json:"flags"`
+	DFDelayTimer *string  `json:"dfDelayTimer"`
+}
+
+// FRR's esi_to_str format.
+var esiPattern = regexp.MustCompile(`^[0-9a-f]{2}(:[0-9a-f]{2}){9}$`)
 
 // parseNeighbour takes the result of a show bgp neighbor x.y.w.z
 // and parses the informations related to the neighbour.
@@ -345,6 +362,47 @@ func ParseEVPNVNIs(vtyshRes string) ([]EVPNVNI, error) {
 			Neighbors:   v.Neighbors,
 			RemoteVTEPs: remote,
 		})
+	}
+	return res, nil
+}
+
+// ParseEVPNES requires an array (empty is valid) with unique ESIs of ten
+// colon-separated hex bytes, including remote-only entries, which are validated
+// but not returned.
+// FRR 10.6.2's zebra_evpn_es_show_entry_detail emits exactly one of df/nonDF for
+// every local entry, even when no election result applies; a missing or conflicting
+// role fails the whole read. DF is reported only when operUp and readyForBgp are
+// set, bypass is absent and dfDelayTimer is absent. Zebra emits dfDelayTimer only
+// while the initial DF delay is active; its value is not used.
+func ParseEVPNES(vtyshRes string) ([]EVPNES, error) {
+	toParse := []FRREVPNES{}
+	err := json.Unmarshal([]byte(vtyshRes), &toParse)
+	if err != nil {
+		return nil, fmt.Errorf("parsing EVPN Ethernet segments: %w", err)
+	}
+	if toParse == nil {
+		return nil, errors.New("EVPN Ethernet segments must be an array, not null")
+	}
+
+	res := make([]EVPNES, 0)
+	seen := make(map[string]bool)
+	for _, s := range toParse {
+		if !esiPattern.MatchString(s.ESI) || seen[s.ESI] {
+			return nil, fmt.Errorf("invalid or duplicate ESI %q", s.ESI)
+		}
+		seen[s.ESI] = true
+		if !slices.Contains(s.Flags, "local") {
+			continue
+		}
+		df, nonDF := slices.Contains(s.Flags, "df"), slices.Contains(s.Flags, "nonDF")
+		if df == nonDF {
+			return nil, fmt.Errorf("local Ethernet segment %s must be exactly one of df or nonDF", s.ESI)
+		}
+		segment := EVPNES{ESI: s.ESI, OperUp: slices.Contains(s.Flags, "operUp")}
+		if segment.OperUp && slices.Contains(s.Flags, "readyForBgp") && !slices.Contains(s.Flags, "bypass") && s.DFDelayTimer == nil {
+			segment.DF = &df
+		}
+		res = append(res, segment)
 	}
 	return res, nil
 }

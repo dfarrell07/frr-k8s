@@ -1143,3 +1143,105 @@ func TestEVPNVNIsMissingCounts(t *testing.T) {
 		}
 	}
 }
+
+// Synthetic show evpn es detail json in the shape of FRR 10.6.2's
+// zebra_evpn_es_show_entry_detail: a local DF segment, a segment known only from
+// a remote VTEP, a local non-DF segment and a local segment that is down.
+const evpnES = `[
+{"esi":"03:00:00:00:00:01:00:00:00:01","accessPort":"bond1","flags":["local","remote","df","readyForBgp","bridgePort","operUp","nexthopGroupActive"]},
+{"esi":"03:00:00:00:00:02:00:00:00:01","flags":["remote"]},
+{"esi":"03:00:00:00:00:01:00:00:00:02","accessPort":"bond2","flags":["local","remote","nonDF","readyForBgp","bridgePort","operUp","nexthopGroupActive"]},
+{"esi":"03:aa:bb:cc:dd:ee:00:00:00:03","accessPort":"bond3","flags":["local","nonDF","readyForBgp","bridgePort"]}
+]
+`
+
+const (
+	esFirst  = `"esi":"03:00:00:00:00:01:00:00:00:01"`
+	esSecond = `"esi":"03:00:00:00:00:01:00:00:00:02"`
+)
+
+func TestEVPNES(t *testing.T) {
+	df, nonDF := true, false
+	expected := []EVPNES{
+		{ESI: "03:00:00:00:00:01:00:00:00:01", OperUp: true, DF: &df},
+		{ESI: "03:00:00:00:00:01:00:00:00:02", OperUp: true, DF: &nonDF},
+		{ESI: "03:aa:bb:cc:dd:ee:00:00:00:03", OperUp: false},
+	}
+	segments, err := ParseEVPNES(evpnES)
+	if err != nil {
+		t.Fatalf("Failed to parse %s", err)
+	}
+	if !cmp.Equal(expected, segments) {
+		t.Fatal("unexpected EVPN Ethernet segments (-want +got)\n", cmp.Diff(expected, segments))
+	}
+}
+
+// Zebra's df or nonDF flag is not an election result while a segment is down,
+// not ready for BGP, in LACP bypass or in its initial DF delay.
+func TestEVPNESRoleOmitted(t *testing.T) {
+	for _, tt := range []struct {
+		name, flags, delay string
+		operUp             bool
+	}{
+		{name: "oper down", flags: `"local","readyForBgp","bridgePort"`},
+		{name: "not ready for BGP", flags: `"local","bridgePort","operUp"`, operUp: true},
+		{name: "LACP bypass", flags: `"local","bypass","readyForBgp","bridgePort","operUp"`, operUp: true},
+		{name: "DF delay", flags: `"local","readyForBgp","bridgePort","operUp"`, delay: `,"dfDelayTimer":"00:00:02"`, operUp: true},
+		{name: "DF delay zero seconds", flags: `"local","readyForBgp","bridgePort","operUp"`, delay: `,"dfDelayTimer":"00:00:00"`, operUp: true},
+	} {
+		for _, role := range []string{"df", "nonDF"} {
+			t.Run(tt.name+"/"+role, func(t *testing.T) {
+				out := `[{"esi":"03:00:00:00:00:01:00:00:00:01","accessPort":"bond1","flags":["` + role + `",` + tt.flags + `]` + tt.delay + `}]`
+				segments, err := ParseEVPNES(out)
+				if err != nil {
+					t.Fatalf("Failed to parse %s", err)
+				}
+				expected := []EVPNES{{ESI: "03:00:00:00:00:01:00:00:00:01", OperUp: tt.operUp}}
+				if !cmp.Equal(expected, segments) {
+					t.Fatal("unexpected EVPN Ethernet segments (-want +got)\n", cmp.Diff(expected, segments))
+				}
+			})
+		}
+	}
+}
+
+func TestEVPNESEmptyAndFailures(t *testing.T) {
+	for _, tt := range []struct {
+		name, out string
+		success   bool
+	}{
+		{name: "empty", out: "[]", success: true},
+		{name: "remote only", out: `[{"esi":"03:00:00:00:00:02:00:00:00:01","flags":["remote"]}]`, success: true},
+		{name: "null", out: "null"},
+		{name: "malformed", out: "["},
+		{name: "wrong shape", out: "{}"},
+		{name: "missing ESI", out: strings.Replace(evpnES, esFirst+",", "", 1)},
+		{name: "invalid ESI", out: strings.Replace(evpnES, "00:01:00:00:00:01", "00:01:00:00:00:0g", 1)},
+		{name: "short ESI", out: strings.Replace(evpnES, `"03:00:00:00:00:01:00:00:00:01"`, `"03:00:00:00:00:01:00:00:00"`, 1)},
+		{name: "ESI with suffix", out: strings.Replace(evpnES, `"03:00:00:00:00:01:00:00:00:01"`, `"03:00:00:00:00:01:00:00:00:01:ff"`, 1)},
+		{name: "duplicate ESI", out: strings.Replace(evpnES, esSecond, esFirst, 1)},
+		{name: "invalid remote-only ESI", out: strings.Replace(evpnES, `"03:00:00:00:00:02:00:00:00:01"`, `"03:00:00:00:00:02:00:00:00:0g"`, 1)},
+		{name: "duplicate remote-only ESI", out: strings.Replace(evpnES, `"03:00:00:00:00:02:00:00:00:01"`, `"03:00:00:00:00:01:00:00:00:01"`, 1)},
+		{name: "duplicate remote-first local ESI", out: strings.Replace(evpnES, esSecond, `"esi":"03:00:00:00:00:02:00:00:00:01"`, 1)},
+		{name: "duplicate remote-first remote ESI", out: `[{"esi":"03:00:00:00:00:02:00:00:00:01","flags":["remote"]},{"esi":"03:00:00:00:00:02:00:00:00:01","flags":["remote"]}]`},
+		{name: "no DF role", out: strings.Replace(evpnES, `"nonDF",`, "", 1)},
+		{name: "both DF roles", out: strings.Replace(evpnES, `"df",`, `"df","nonDF",`, 1)},
+		{name: "oper down with no DF role", out: strings.Replace(evpnES, `"local","nonDF",`, `"local",`, 1)},
+		{name: "oper down with both DF roles", out: strings.Replace(evpnES, `"local","nonDF",`, `"local","df","nonDF",`, 1)},
+		{name: "invalid flags", out: strings.Replace(evpnES, `"flags":["remote"]`, `"flags":"remote"`, 1)},
+		{name: "invalid DF delay", out: strings.Replace(evpnES, `"accessPort":"bond1",`, `"accessPort":"bond1","dfDelayTimer":3,`, 1)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			segments, err := ParseEVPNES(tt.out)
+			if tt.success {
+				if err != nil || len(segments) != 0 {
+					t.Fatalf("expected empty inventory, got %v, error %v", segments, err)
+				}
+				return
+			}
+			if err == nil || segments != nil {
+				t.Fatalf("expected parse failure without Ethernet segments, got %v, error %v", segments, err)
+			}
+		})
+	}
+}

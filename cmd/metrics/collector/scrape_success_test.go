@@ -28,6 +28,7 @@ func TestScrapeFailuresAndRecovery(t *testing.T) {
 		{"bfd counter VRFs", "bfd", "show bgp vrf all json", 2, true},
 		{"bfd counters", "bfd", "show bfd vrf default peers counters json", 1, true},
 		{"evpn VNIs", "evpn", "show evpn vni json", 1, false},
+		{"es segments", "es", "show evpn es detail json", 1, false},
 	} {
 		for _, failure := range []string{"command", "parse"} {
 			t.Run(tt.name+"/"+failure, func(t *testing.T) {
@@ -47,24 +48,28 @@ func TestScrapeFailuresAndRecovery(t *testing.T) {
 				}
 				r := prometheus.NewPedanticRegistry()
 				r.MustRegister(scrapeCollector(tt.collector, cli))
-				families := checkScrape(t, r, tt.collector, 0)
-				if calls != tt.occurrence {
-					t.Fatalf("failure reached %d times, want %d", calls, tt.occurrence)
-				}
-				if tt.partial {
-					if !families["frrk8s_bfd_session_up"] || families["frrk8s_bfd_control_packet_input"] {
-						t.Fatalf("want partial BFD sessions without counters, got %v", families)
+				checkFailure := func() {
+					t.Helper()
+					families := checkScrape(t, r, tt.collector, 0)
+					if calls != tt.occurrence {
+						t.Fatalf("failure reached %d times, want %d", calls, tt.occurrence)
 					}
-				} else if len(families) != 1 {
-					t.Fatalf("want only failure status, got %v", families)
+					if tt.partial {
+						if !families["frrk8s_bfd_session_up"] || families["frrk8s_bfd_control_packet_input"] {
+							t.Fatalf("want partial BFD sessions without counters, got %v", families)
+						}
+					} else if len(families) != 1 {
+						t.Fatalf("want only failure status, got %v", families)
+					}
 				}
+				checkFailure()
 				fail = false
 				if families := checkScrape(t, r, tt.collector, 1); len(families) == 1 {
 					t.Fatal("recovered scrape omitted observations")
 				}
-				// A later failure must not retain success from recovery.
+				// A later failure must not keep success or observations from recovery.
 				fail, calls = true, 0
-				checkScrape(t, r, tt.collector, 0)
+				checkFailure()
 			})
 		}
 	}
@@ -97,13 +102,30 @@ func TestScrapeEmptyInventory(t *testing.T) {
 
 func TestScrapeJointRegistration(t *testing.T) {
 	r := prometheus.NewPedanticRegistry()
-	for _, name := range []string{"bgp", "bfd", "evpn"} {
+	for _, name := range []string{"bgp", "bfd", "evpn", "es"} {
 		if err := r.Register(scrapeCollector(name, scrapeCLI)); err != nil {
 			t.Fatalf("registering %s: %v", name, err)
 		}
 	}
-	expected := scrapeSuccessText("bfd", 1) + "frrk8s_scrape_success{collector=\"bgp\"} 1\nfrrk8s_scrape_success{collector=\"evpn\"} 1\n"
+	expected := scrapeSuccessText("bfd", 1) + "frrk8s_scrape_success{collector=\"bgp\"} 1\nfrrk8s_scrape_success{collector=\"es\"} 1\nfrrk8s_scrape_success{collector=\"evpn\"} 1\n"
 	if err := testutil.GatherAndCompare(r, strings.NewReader(expected), "frrk8s_scrape_success"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// ES and VNI reads are separate collectors, so an ES failure leaves the VNI
+// observations and status as a healthy scrape reports them, in the same gather.
+func TestScrapeESFailureKeepsEVPN(t *testing.T) {
+	cli := func(command string) (string, error) {
+		if command == "show evpn es detail json" {
+			return "", errors.New("read failed")
+		}
+		return scrapeCLI(command)
+	}
+	r := prometheus.NewPedanticRegistry()
+	r.MustRegister(scrapeCollector("evpn", cli), scrapeCollector("es", cli))
+	expected := evpnText + scrapeSuccessText("es", 0) + "frrk8s_scrape_success{collector=\"evpn\"} 1\n"
+	if err := testutil.GatherAndCompare(r, strings.NewReader(expected)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -123,6 +145,10 @@ func scrapeCollector(name string, cli vtysh.Cli) prometheus.Collector {
 		c := NewEVPN(l).(*evpn)
 		c.frrCli = cli
 		return c
+	case "es":
+		c := NewES(l).(*es)
+		c.frrCli = cli
+		return c
 	default:
 		panic("unknown collector " + name)
 	}
@@ -140,6 +166,8 @@ func scrapeCLI(command string) (string, error) {
 		return peersCountersIPv4, nil
 	case "show evpn vni json":
 		return evpnCapture, nil
+	case "show evpn es detail json":
+		return esCapture, nil
 	default:
 		return "", fmt.Errorf("unexpected command %q", command)
 	}

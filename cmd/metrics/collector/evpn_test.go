@@ -17,8 +17,8 @@ const evpnCapture = `{
 "50001":{"vni":50001,"vxlanIf":"vxlan50001","numMacs":0,"numArpNd":0,"numRemoteVteps":"n/a","type":"L3","tenantVrf":"red"}}
 `
 
-func TestEVPN(t *testing.T) {
-	expected := `# HELP frrk8s_evpn_l2_macs Host MAC addresses zebra holds for the L2 VNI
+// evpnText is what the evpn collector reports for evpnCapture, without its status.
+const evpnText = `# HELP frrk8s_evpn_l2_macs Host MAC addresses zebra holds for the L2 VNI
 # TYPE frrk8s_evpn_l2_macs gauge
 frrk8s_evpn_l2_macs{vni="10100",vrf="default"} 2
 # HELP frrk8s_evpn_l2_neighbors ARP/ND entries zebra holds for the L2 VNI
@@ -37,7 +37,10 @@ frrk8s_evpn_l3_nexthops{vni="50001",vrf="red"} 0
 # TYPE frrk8s_evpn_vni_info gauge
 frrk8s_evpn_vni_info{interface="vxlan10100",type="L2",vni="10100",vrf="default"} 1
 frrk8s_evpn_vni_info{interface="vxlan50001",type="L3",vni="50001",vrf="red"} 1
-` + scrapeSuccessText("evpn", 1)
+`
+
+func TestEVPN(t *testing.T) {
+	expected := evpnText + scrapeSuccessText("evpn", 1)
 	checkEVPN(t, evpnCapture, nil, expected)
 	out := strings.Replace(evpnCapture, `"numMacs":0,"numArpNd":0`, `"numMacs":3,"numArpNd":4`, 1)
 	expected = strings.Replace(expected, `frrk8s_evpn_l3_router_macs{vni="50001",vrf="red"} 0`, `frrk8s_evpn_l3_router_macs{vni="50001",vrf="red"} 3`, 1)
