@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/onsi/ginkgo/v2"
@@ -168,6 +169,17 @@ var _ = ginkgo.Describe("Establish BGP session with EnableGracefulRestart", func
 			// 2*time.Minute is important because that is the Graceful Restart timer.
 			Consistently(check, 2*time.Minute, time.Second).ShouldNot(HaveOccurred())
 			Eventually(c, time.Minute, time.Second).Should(BeClosed(), "restart FRRK8s pods are not yet ready")
+
+			// The cleanup deletes the BGP instance. FRR's bgp_delete() does not
+			// cancel a pending tier-2 path-selection deferral timer, which then
+			// fires on the freed instance and crashes bgpd, so let the
+			// restarted pods finish deferring before the cleanup runs.
+			// Remove once the pinned FRR cancels that timer.
+			ginkgo.By("waiting for the restarted frr-k8s pods to end path-selection deferral")
+			Eventually(func() error {
+				return podsDeferringPathSelection(cs)
+			}, 2*frrSelectionDeferralTime, 5*time.Second).ShouldNot(HaveOccurred(),
+				"restarted frr-k8s pods should have ended path-selection deferral")
 		},
 			ginkgo.Entry("IPV4", ipfamily.IPv4, "192.168.2.0/24"),
 			ginkgo.Entry("IPV6", ipfamily.IPv6, "fc00:f853:ccd:e799::/64"),
@@ -262,6 +274,39 @@ func peersOutOfRestartWindow(cs clientset.Interface) error {
 			if uptime < restartWindow+time.Second {
 				return fmt.Errorf("peer %s of pod %s advertised the restart state bit %s ago, restart window is %s",
 					ip, pod.Name, uptime, restartWindow)
+			}
+		}
+	}
+	return nil
+}
+
+// frrSelectionDeferralTime is FRR's default graceful restart select-defer-time,
+// which frr-k8s does not configure.
+const frrSelectionDeferralTime = 120 * time.Second
+
+// podsDeferringPathSelection returns an error while any frr-k8s pod has a
+// graceful restart path-selection deferral timer running. vtysh prints the
+// deferral timers per neighbor and address family only when the family is
+// active and the graceful restart capability was both sent and received, so
+// the configured deferral time must be present for the absence of the
+// remaining times to mean the timers ended.
+func podsDeferringPathSelection(cs clientset.Interface) error {
+	pods, err := k8s.FRRK8sPods(cs)
+	if err != nil {
+		return err
+	}
+	for _, pod := range pods {
+		exc := executor.ForPod(pod.Namespace, pod.Name, k8s.FRRContainerName)
+		out, err := exc.Exec("vtysh", "-c", "show bgp neighbors graceful-restart json")
+		if err != nil {
+			return fmt.Errorf("failed to query the graceful restart state of pod %s: %w", pod.Name, err)
+		}
+		if !strings.Contains(out, `"selectionDeferralTimer"`) {
+			return fmt.Errorf("pod %s reports no graceful restart path-selection state", pod.Name)
+		}
+		for _, timer := range []string{"selectionDeferralTimerRemaining", "selectionDeferralTier2TimerRemaining"} {
+			if strings.Contains(out, `"`+timer+`"`) {
+				return fmt.Errorf("pod %s still has %s", pod.Name, timer)
 			}
 		}
 	}
